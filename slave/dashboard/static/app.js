@@ -283,12 +283,22 @@ function renderStatus() {
   );
 }
 
-function setView(v) {
+function setView(v, { focus = true } = {}) {
   if (!VIEWS.includes(v) || v === S.view) return;
   S.view = v;
+  if (location.hash.slice(1) !== v) history.replaceState(null, "", `#${v}`);
+  if (v === "replay" && !S.replay) autoOpenReplay();
   render(true);
-  document.getElementById("view").focus({ preventScroll: true });
+  if (focus) document.getElementById("view").focus({ preventScroll: true });
 }
+
+// Entering replay with nothing selected opens the most recent incident.
+function autoOpenReplay() {
+  const inc = S.snap?.sessions.find((s) => s.max_tier >= 2);
+  if (inc) openReplay(inc.id);
+}
+
+window.addEventListener("hashchange", () => setView(location.hash.slice(1)));
 
 // ---------- wiring ----------
 
@@ -323,6 +333,7 @@ function connect(delay = 500) {
     if (msg.type === "hello") {
       S.snap = msg.snapshot;
       S.log = msg.snapshot.log.slice(-LOG_CAP);
+      if (S.view === "replay" && !S.replay) autoOpenReplay();
     } else if (msg.type === "update") {
       S.snap = msg.snapshot;
       if (msg.lines.length) {
@@ -339,5 +350,7 @@ function connect(delay = 500) {
   };
 }
 
+const initial = location.hash.slice(1);
+if (VIEWS.includes(initial)) S.view = initial;
 render(true);
 connect();

@@ -6,6 +6,10 @@ Every agent-to-agent message and agent-to-tool call passes through a gateway. Th
 
 The full design is in [docs/design.md](docs/design.md).
 
+![Ops Terminal dashboard, overview](docs/img/dashboard-overview.png)
+
+*The Ops Terminal dashboard. A researcher read untrusted web content, was blocked by rule P1 when it tried to query restricted payroll data, and was then quarantined. See [Ops Terminal dashboard](#ops-terminal-dashboard) for the other views.*
+
 ## Status
 
 | Component | State |
@@ -155,6 +159,18 @@ Views (use the keys or click the tabs):
 | F2 / 2 | graph | Session list. For the selected session: agent tree (tiers, taint labels, allowed and denied tool calls) and message edges |
 | F3 / 3 | taint | P1–P4 rule hits, and agents that carry taint labels or are flagged |
 | F4 / 4 | replay | Incidents at tier 2 or above. Step through one session's event log with ← → |
+
+Each view can be opened directly by URL: `#overview`, `#graph`, `#taint`, `#replay`.
+
+| F2 graph | F3 taint |
+|---|---|
+| ![graph view](docs/img/dashboard-graph.png) | ![taint view](docs/img/dashboard-taint.png) |
+
+| F4 replay |
+|---|
+| ![replay view](docs/img/dashboard-replay.png) |
+
+The screenshots were taken with the scripted demo feed at `--speed 4`.
 
 By default, a **scripted demo feed** (`slave/sim/demo_feed.py`) drives the dashboard. It is not the real simulator. Each cycle replays four sessions: one benign session, an A1 prompt injection blocked by P1 and quarantined, an A4 spawn bomb stopped by the P4 cap, and an A5 ping-pong loop that gets elevated. It emits the control-plane decisions (gate, score, tier) that the real pipeline will produce later.
 
