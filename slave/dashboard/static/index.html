@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Project Slave — Ops Terminal</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <div class="screen">
+    <header class="topbar">
+      <div class="prompt">
+        <span class="host">slave@gateway</span><span class="dim">:~/control$</span>
+        <span id="cmd">watch --all-sessions</span><span class="cursor" aria-hidden="true">&nbsp;</span>
+      </div>
+      <nav class="tabs" aria-label="Views">
+        <button type="button" data-view="overview" aria-keyshortcuts="F1">[F1] overview</button>
+        <button type="button" data-view="graph" aria-keyshortcuts="F2">[F2] graph</button>
+        <button type="button" data-view="taint" aria-keyshortcuts="F3">[F3] taint</button>
+        <button type="button" data-view="replay" aria-keyshortcuts="F4">[F4] replay</button>
+        <span id="conn" class="conn" role="status">○ connecting</span>
+      </nav>
+    </header>
+
+    <main id="view" tabindex="-1"></main>
+
+    <footer class="statusbar dim" id="statusbar"></footer>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
