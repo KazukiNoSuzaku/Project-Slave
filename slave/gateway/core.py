@@ -22,9 +22,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-from slave.gateway.policy import AgentState, Policy, SessionState, Verdict
+from slave.gateway.policy import AgentState, Policy, ProvenanceRules, Request, SessionState, Verdict
 from slave.registry import Registry, default_registry
-from slave.schema import Event, EventKind, NodeType, Tier
+from slave.schema import Event, EventKind, NodeType, Tier, Trust, join_trust
 
 
 class GatewayError(Exception):
@@ -49,6 +49,8 @@ class ToolResponse:
 
 Executor = Callable[[str, dict], ToolOutput]
 Sink = Callable[[Event], "Event | None"]  # may return a replacement (e.g. sealed) event
+# Human-in-the-loop for P1: (agent, tool, args, verdict) -> approved?
+Approver = Callable[[AgentState, str, dict, Verdict], bool]
 
 
 def _default_executor(tool: str, args: dict) -> ToolOutput:
@@ -74,9 +76,11 @@ class Gateway:
         sinks: Iterable[Sink] = (),
         clock: Callable[[], datetime] = _utcnow,
         latency_in_events: bool = True,
+        approver: Approver | None = None,
     ) -> None:
         self.registry = registry or default_registry()
-        self.policy = policy or Policy(self.registry)
+        self.policy = policy or Policy(self.registry, provenance=ProvenanceRules())
+        self.approver = approver
         self.executor = executor
         self.sinks = list(sinks)
         self.clock = clock
@@ -116,6 +120,20 @@ class Gateway:
         self._emit(session_id, kind=EventKind.GATE_DECISION, src_id=agent.agent_id, src_role=agent.role,
                    dst_id=dst, decision=verdict.decision, rule=verdict.rule, reason=verdict.reason,
                    latency_ms=round(latency, 4) if self.latency_in_events else None)
+        if verdict.escalate is not None and verdict.escalate > agent.tier:
+            self.set_tier(session_id, agent.agent_id, verdict.escalate, f"{verdict.rule}: {verdict.reason}")
+
+    # ---- provenance ---------------------------------------------------------
+
+    @staticmethod
+    def _absorb(agent: AgentState, trust: Trust, labels: set[str] | frozenset[str]) -> None:
+        agent.trust = join_trust(agent.trust, trust)
+        agent.labels |= labels
+
+    def _note_request(self, sender: AgentState, receiver: AgentState) -> None:
+        """Remember untrusted requests flowing up the privilege ladder (input to P3)."""
+        if sender.trust is Trust.UNTRUSTED and sender.privilege_tier < receiver.privilege_tier:
+            receiver.untrusted_requests.append(Request(self.clock(), sender.agent_id, sender.privilege_tier))
 
     # ---- session lifecycle --------------------------------------------------
 
@@ -152,8 +170,10 @@ class Gateway:
         if not verdict.allowed:
             return verdict
         role = self.registry.roles[child_role]
-        sess.agents[child_id] = AgentState(child_id, session_id, child_role, role.privilege_tier,
-                                           parent_id=parent_id, depth=parent.depth + 1)
+        child = sess.agents[child_id] = AgentState(child_id, session_id, child_role, role.privilege_tier,
+                                                   parent_id=parent_id, depth=parent.depth + 1)
+        self._absorb(child, parent.trust, parent.labels)  # child starts with the parent's context
+        self._note_request(parent, child)
         parent.children += 1
         sess.recent_spawns.append(now)
         self._emit(session_id, kind=EventKind.SPAWN, src_id=parent_id, src_role=parent.role, dst_id=child_id,
@@ -161,19 +181,38 @@ class Gateway:
                    privilege_tier=role.privilege_tier)
         return verdict
 
-    def send(self, session_id: str, src_id: str, dst_id: str, *, token_count: int | None = None) -> Verdict:
-        """Agent-to-agent message. A gate decision is recorded only on denial."""
+    def send(self, session_id: str, src_id: str, dst_id: str, *, token_count: int | None = None,
+             structured: bool = False) -> Verdict:
+        """Agent-to-agent message. A gate decision is recorded only on denial.
+
+        `structured=True` means the payload went through a schema-validated
+        channel (no free text). That declassifies *trust* — instructions can't
+        ride along — but data classes still propagate.
+        """
         t0 = time.perf_counter()
         sess = self._session(session_id)
         src = self._agent(sess, src_id)
-        self._agent(sess, dst_id)
+        dst = self._agent(sess, dst_id)
         verdict = self.policy.check_message(src)
         if not verdict.allowed:
             self._gate(session_id, src, dst_id, verdict, t0)
             return verdict
         self._emit(session_id, kind=EventKind.MSG_SEND, src_id=src_id, src_role=src.role, dst_id=dst_id,
-                   dst_type=NodeType.AGENT, token_count=token_count)
+                   dst_type=NodeType.AGENT, token_count=token_count, trust=src.trust, data_classes=set(src.labels),
+                   reason="structured" if structured else None)
+        if structured:
+            self._absorb(dst, Trust.INTERNAL, src.labels)
+        else:
+            self._absorb(dst, src.trust, src.labels)
+            self._note_request(src, dst)
         return verdict
+
+    def reset_context(self, session_id: str, agent_id: str, reason: str = "task boundary") -> None:
+        """Called by the (trusted) agent runtime when it really clears an agent's context."""
+        agent = self._agent(self._session(session_id), agent_id)
+        agent.trust, agent.labels = Trust.SYSTEM, set()
+        agent.untrusted_requests.clear()
+        self._emit(session_id, kind=EventKind.CONTEXT_RESET, src_id=agent_id, src_role=agent.role, reason=reason)
 
     def call_tool(self, session_id: str, agent_id: str, tool_name: str, args: dict | None = None) -> ToolResponse:
         t0 = time.perf_counter()
@@ -187,8 +226,11 @@ class Gateway:
 
         self._emit(session_id, kind=EventKind.TOOL_CALL, src_id=agent_id, src_role=agent.role,
                    privilege_tier=agent.privilege_tier, dst_id=tool_name, dst_type=NodeType.TOOL,
-                   side_effect=tool.side_effect if tool else None, sensitivity=sensitivity, args_hash=h)
+                   side_effect=tool.side_effect if tool else None, sensitivity=sensitivity, args_hash=h,
+                   trust=agent.trust, data_classes=set(agent.labels))
         verdict = self.policy.check_tool(sess, agent, tool, tool_name, args, h, now)
+        if verdict.decision == "approve_required" and self.approver and self.approver(agent, tool_name, args, verdict):
+            verdict = Verdict("allow", verdict.rule, f"approved: {verdict.reason}")
         self._gate(session_id, agent, tool_name, verdict, t0)
         if not verdict.allowed:
             return ToolResponse(False, verdict.rule, verdict.reason)
@@ -205,6 +247,7 @@ class Gateway:
         self._emit(session_id, kind=EventKind.TOOL_RESULT, src_id=agent_id, src_role=agent.role, dst_id=tool_name,
                    dst_type=NodeType.TOOL, status=output.status, trust=tool.output_trust, data_classes=classes,
                    row_volume=output.rows)
+        self._absorb(agent, tool.output_trust, classes)
         return ToolResponse(True, output=output)
 
     # ---- control plane ------------------------------------------------------
@@ -217,6 +260,10 @@ class Gateway:
                    reason=reason)
 
     # ---- metrics ------------------------------------------------------------
+
+    def event_count(self, session_id: str) -> int:
+        """Events emitted so far in a session; the next event's index."""
+        return self._event_counter.get(session_id, 0)
 
     def latency_percentile(self, q: float) -> float | None:
         if not self.gate_latency_ms:

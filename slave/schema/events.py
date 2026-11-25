@@ -25,6 +25,7 @@ class EventKind(str, Enum):
     DATA_ACCESS = "DATA_ACCESS"
     SPAWN = "SPAWN"
     TERMINATE = "TERMINATE"
+    CONTEXT_RESET = "CONTEXT_RESET"  # runtime cleared an agent's context (provenance labels reset)
     # control plane
     GATE_DECISION = "GATE_DECISION"
     SCORE = "SCORE"
@@ -47,6 +48,14 @@ class Trust(str, Enum):
     SYSTEM = "system"
     INTERNAL = "internal"
     UNTRUSTED = "untrusted"
+
+
+TRUST_RANK = {Trust.UNTRUSTED: 0, Trust.INTERNAL: 1, Trust.SYSTEM: 2}
+
+
+def join_trust(a: Trust, b: Trust) -> Trust:
+    """Provenance join: a context is only as trusted as the least-trusted thing in it."""
+    return a if TRUST_RANK[a] <= TRUST_RANK[b] else b
 
 
 class Tier(IntEnum):
@@ -84,6 +93,8 @@ class Event(BaseModel):
     sensitivity: int | None = None
     args_hash: str | None = None
     status: Literal["ok", "error"] | None = None
+    # TOOL_RESULT: label of the output. TOOL_CALL / MSG_SEND: the caller's
+    # context label at the time of the action.
     trust: Trust | None = None
     data_classes: set[str] = Field(default_factory=set)
     resource_uri: str | None = None

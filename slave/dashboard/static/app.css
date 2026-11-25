@@ -73,6 +73,7 @@ pre.tree { margin: 6px 0 0; font: inherit; white-space: pre; overflow-x: auto; }
 .t1, .lv-TIER1, .lv-SCORE { color: var(--amber); }
 .t2, .lv-TIER2 { color: var(--orange); }
 .t3, .lv-TIER3, .lv-DENY { color: var(--red); }
+.lv-HOLD { color: var(--orange); }
 .lv-INFO { color: var(--green); }
 .taint { color: var(--amber); }
 .deny { color: var(--red); }

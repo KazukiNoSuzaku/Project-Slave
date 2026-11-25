@@ -78,6 +78,7 @@ def default_registry() -> Registry:
         StoreSpec("repo", "internal", 1),
         StoreSpec("docs", "internal", 1),
         StoreSpec("sales_db", "internal", 2),
+        StoreSpec("customers_db", "pii", 3, frozenset({"pii"})),
         StoreSpec("hr_db", "restricted", 4, frozenset({"pii", "restricted"})),
     ]
     roles = [

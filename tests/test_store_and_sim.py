@@ -1,5 +1,7 @@
 from datetime import datetime, timezone
 
+from slave.gateway import Policy
+from slave.registry import default_registry
 from slave.schema import Event, EventKind, Trust
 from slave.sim.cli import main as sim_main
 from slave.sim.swarm import generate
@@ -62,13 +64,13 @@ def test_deleted_row_is_detected(tmp_path):
 
 
 def test_simulator_is_reproducible_and_benign():
+    static = Policy(default_registry())  # Phase 1 rules only: benign traffic must never trip them
     with EventStore() as a, EventStore() as b:
-        sa = generate(60, seed=3, store=a)
-        sb = generate(60, seed=3, store=b)
+        sa = generate(60, seed=3, store=a, policy=static)
+        sb = generate(60, seed=3, store=b, policy=Policy(default_registry()))
         assert sa.head_hash == sb.head_hash
         assert a.verify().ok
     assert sa.events == sb.events > 0
-    # benign traffic must never trip the static policy
     assert sa.denials == {}
     assert set(sa.roles) == {"planner", "researcher", "coder", "reviewer", "data_analyst", "ops"}
     assert set(sa.workflows) == {"code_change", "research_report", "data_question", "ops_incident"}

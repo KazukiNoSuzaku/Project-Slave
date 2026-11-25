@@ -130,8 +130,12 @@ Prompt injection enters through *content*. Graph topology alone can't see "this 
 |---|---|---|
 | P1 Injection → privileged action | `min_trust = untrusted` ∧ tool is `mutating`/`external_egress` ∧ `sensitivity ≥ 3` | Require human approval (Tier 2 for that call) |
 | P2 Exfiltration | `{pii, restricted} ∩ data_classes ≠ ∅` ∧ tool is `external_egress` | Deny + Tier 3 |
-| P3 Confused deputy | `MSG_SEND u→v` with `tier(u) < tier(v)` followed within the window by `v` accessing a resource above `tier(u)` | Deny that access; Tier ≥2 for `v` |
+| P3 Confused deputy | `MSG_SEND` or `SPAWN u→v` where `u`'s context is **untrusted** and `privilege(u) < privilege(v)`, followed within 10 min by `v` accessing a resource with sensitivity above `privilege(u)` | Deny that access; Tier 2 for `v` |
 | P4 Caps | spawn depth > D, spawn rate > S/min, identical (tool, args) repeat > K | Deny; Tier 2 |
+
+**Phase 2 refinement of P3:** the rule only counts requests whose sender context is untrusted. If it counted every lower-privilege request, a planner (privilege 2) delegating a restart to ops (privilege 3) would be blocked, and that is ordinary delegation.
+
+**Measured (Phase 2):** see [results/phase2-ablation.md](results/phase2-ablation.md). Adding P1–P3 raises prevention across A1–A8 from 12% to 75%. 1.3% of benign sessions see at least one block, and a context reset between tasks removes all of those blocks in the simulator.
 
 **Known limitation — label creep:** conservative propagation over-taints long sessions. We measure an **over-taint rate** (benign calls blocked by P1–P3) as a first-class metric and evaluate two mitigations: per-agent context resets on task boundaries, and sanitizer declassification.
 

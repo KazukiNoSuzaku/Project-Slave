@@ -143,14 +143,15 @@ class DashboardState:
             case EventKind.GATE_DECISION:
                 if event.latency_ms is not None:
                     self.gate_latency.append(event.latency_ms)
-                if event.decision == "deny":
+                if event.decision in ("deny", "approve_required"):
                     use = src.tools.setdefault(event.dst_id or "?", ToolUse())
                     use.denied += 1
                     use.last_rule = event.rule
                     self.denials.append(event.ts)
                     if event.rule:
                         self.rule_hits[event.rule] += 1
-                    emit("DENY", f"{event.rule or 'policy'} {event.src_id} {event.dst_id}"
+                    level = "DENY" if event.decision == "deny" else "HOLD"  # HOLD = awaiting human approval
+                    emit(level, f"{event.rule or 'policy'} {event.src_id} {event.dst_id}"
                          + (f" — {event.reason}" if event.reason else ""))
             case EventKind.SCORE:
                 src.last_p_star = event.p_star
@@ -170,6 +171,9 @@ class DashboardState:
                      + (f" — {event.reason}" if event.reason else ""))
             case EventKind.TERMINATE:
                 emit("INFO", f"TERMINATE {event.src_id}")
+            case EventKind.CONTEXT_RESET:
+                src.taint.clear()
+                emit("INFO", f"context reset {event.src_id} ({event.reason})")
             case EventKind.DATA_ACCESS:
                 pass
 

@@ -1,15 +1,25 @@
-"""Synchronous gate policy — Phase 1 rules (design.md §2.1, §3.2 P4).
+"""Synchronous gate policy (design.md §2.1, §3.2).
 
-Rules are evaluated in order; the first that fires decides. Provenance rules
-P1–P3 arrive in Phase 2 and slot in after the tier rules.
+Rules are evaluated in order; the first that fires decides.
 
-| Rule | Fires when |
-|------|-----------|
-| T3   | agent is quarantined — everything denied |
-| T2   | agent is constrained — mutating / egress tools and spawning denied |
-| S1   | role may not use this tool (or may not spawn) |
-| S2   | effective sensitivity of the call exceeds the agent's privilege tier |
-| P4   | caps: spawn depth, spawn fan-out, spawn rate, call rate, identical-call repeats |
+| Rule | Fires when | Outcome |
+|------|-----------|---------|
+| T3 | agent is quarantined | deny everything |
+| T2 | agent is constrained | deny mutating / egress tools and spawning |
+| S1 | role may not use this tool (or may not spawn) | deny |
+| S2 | effective sensitivity of the call > agent's privilege tier | deny |
+| P2 | context holds pii/restricted data ∧ tool is external egress | deny + escalate to Tier 3 |
+| P1 | context is untrusted ∧ tool mutates or egresses ∧ sensitivity ≥ threshold | require human approval |
+| P3 | an *untrusted*, lower-privilege agent recently asked this agent (message or spawn) ∧ the call's sensitivity exceeds the requester's privilege | deny + escalate to Tier 2 |
+| P4 | caps: spawn depth, fan-out, spawn rate, call rate, identical-call repeats | deny |
+
+P1–P3 read the agent's provenance label (`AgentState.trust`, `.labels`),
+which the gateway maintains. They are active only when `ProvenanceRules` is
+passed (ablation rung R1 runs without them).
+
+P3 refines design v2: requests from lower-privilege agents are normal
+delegation (planner → ops). Only requests whose sender context is untrusted
+are treated as possible confused-deputy attempts.
 """
 
 from __future__ import annotations
@@ -20,7 +30,7 @@ from datetime import datetime, timedelta
 from typing import Literal
 
 from slave.registry import Registry, ToolSpec
-from slave.schema import SideEffect, Tier
+from slave.schema import SideEffect, Tier, Trust
 
 Action = Literal["tool", "spawn", "message"]
 
@@ -35,6 +45,22 @@ class Caps:
     window: timedelta = timedelta(minutes=1)
 
 
+@dataclass(frozen=True)
+class ProvenanceRules:
+    p1_min_sensitivity: int = 3
+    sensitive_classes: frozenset[str] = frozenset({"pii", "restricted"})
+    p3_window: timedelta = timedelta(minutes=10)
+
+
+@dataclass
+class Request:
+    """A message or spawn from a lower-privilege agent with an untrusted context."""
+
+    at: datetime
+    sender: str
+    sender_privilege: int
+
+
 @dataclass
 class AgentState:
     agent_id: str
@@ -46,6 +72,10 @@ class AgentState:
     tier: Tier = Tier.NORMAL
     children: int = 0
     recent_calls: deque[tuple[datetime, str]] = field(default_factory=deque)
+    # provenance label of everything that has entered this agent's context
+    trust: Trust = Trust.SYSTEM
+    labels: set[str] = field(default_factory=set)
+    untrusted_requests: deque[Request] = field(default_factory=deque)
 
 
 @dataclass
@@ -57,9 +87,10 @@ class SessionState:
 
 @dataclass(frozen=True)
 class Verdict:
-    decision: Literal["allow", "deny"]
+    decision: Literal["allow", "deny", "approve_required"]
     rule: str | None = None
     reason: str | None = None
+    escalate: Tier | None = None  # tier the gateway should raise the agent to
 
     @property
     def allowed(self) -> bool:
@@ -69,8 +100,8 @@ class Verdict:
 ALLOW = Verdict("allow")
 
 
-def _deny(rule: str, reason: str) -> Verdict:
-    return Verdict("deny", rule, reason)
+def _deny(rule: str, reason: str, escalate: Tier | None = None) -> Verdict:
+    return Verdict("deny", rule, reason, escalate)
 
 
 def _trim(dq: deque, now: datetime, window: timedelta, key=lambda x: x) -> None:
@@ -79,9 +110,11 @@ def _trim(dq: deque, now: datetime, window: timedelta, key=lambda x: x) -> None:
 
 
 class Policy:
-    def __init__(self, registry: Registry, caps: Caps | None = None) -> None:
+    def __init__(self, registry: Registry, caps: Caps | None = None,
+                 provenance: ProvenanceRules | None = None) -> None:
         self.registry = registry
         self.caps = caps or Caps()
+        self.provenance = provenance
 
     def check_tool(self, sess: SessionState, agent: AgentState, tool: ToolSpec | None, tool_name: str,
                    args: dict, args_hash: str, now: datetime) -> Verdict:
@@ -97,7 +130,29 @@ class Policy:
         sens = self.registry.effective_sensitivity(tool, args)
         if sens > agent.privilege_tier:
             return _deny("S2", f"sensitivity {sens} > privilege {agent.privilege_tier}")
+        if self.provenance and (v := self._provenance(agent, tool, sens, now)):
+            return v
+        return self._call_caps(agent, tool_name, args_hash, now)
 
+    def _provenance(self, agent: AgentState, tool: ToolSpec, sens: int, now: datetime) -> Verdict | None:
+        rules = self.provenance
+        assert rules is not None
+        held = agent.labels & rules.sensitive_classes
+        if held and tool.side_effect is SideEffect.EXTERNAL_EGRESS:
+            return _deny("P2", f"context holds {','.join(sorted(held))} → egress via {tool.name}",
+                         escalate=Tier.QUARANTINED)
+        if (agent.trust is Trust.UNTRUSTED and tool.side_effect is not SideEffect.READ_ONLY
+                and sens >= rules.p1_min_sensitivity):
+            return Verdict("approve_required", "P1",
+                           f"untrusted context → {tool.side_effect.value} {tool.name} (sensitivity {sens})")
+        _trim(agent.untrusted_requests, now, rules.p3_window, key=lambda r: r.at)
+        for req in agent.untrusted_requests:
+            if sens > req.sender_privilege:
+                return _deny("P3", f"untrusted request from {req.sender} (privilege {req.sender_privilege}) "
+                                   f"→ sensitivity {sens}", escalate=Tier.CONSTRAINED)
+        return None
+
+    def _call_caps(self, agent: AgentState, tool_name: str, args_hash: str, now: datetime) -> Verdict:
         caps = self.caps
         _trim(agent.recent_calls, now, caps.window, key=lambda x: x[0])
         if len(agent.recent_calls) >= caps.max_calls_per_minute:
@@ -115,8 +170,6 @@ class Policy:
             return _deny("S1", f"role {parent.role} may not spawn")
         if child_role not in self.registry.roles:
             return _deny("S1", f"unknown role {child_role}")
-        # Delegating to a higher-privilege role is allowed statically; abuse of
-        # it (confused deputy) is rule P3, which needs provenance (Phase 2).
         caps = self.caps
         if parent.depth + 1 > caps.max_spawn_depth:
             return _deny("P4", f"spawn depth {parent.depth + 1} > cap {caps.max_spawn_depth}")

@@ -16,6 +16,7 @@ dependencies = [
 [project.scripts]
 slave-dashboard = "slave.dashboard.server:main"
 slave-sim = "slave.sim.cli:main"
+slave-eval = "slave.eval.cli:main"
 
 [dependency-groups]
 dev = [

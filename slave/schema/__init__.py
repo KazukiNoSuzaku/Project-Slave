@@ -1,4 +1,5 @@
 from slave.schema.events import (
+    TRUST_RANK,
     Decision,
     Event,
     EventKind,
@@ -6,6 +7,8 @@ from slave.schema.events import (
     SideEffect,
     Tier,
     Trust,
+    join_trust,
 )
 
-__all__ = ["Decision", "Event", "EventKind", "NodeType", "SideEffect", "Tier", "Trust"]
+__all__ = ["TRUST_RANK", "Decision", "Event", "EventKind", "NodeType", "SideEffect", "Tier", "Trust",
+           "join_trust"]
