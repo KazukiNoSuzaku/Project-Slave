@@ -12,6 +12,8 @@ dependencies = [
     "duckdb>=1.1",
     "pyarrow>=17",
     "river>=0.21",
+    "torch>=2.4",
+    "torch-geometric>=2.6",
 ]
 
 [project.scripts]

@@ -106,14 +106,14 @@ def test_controller_only_relaxes_tiers_it_raised():
     gw.open_session("s", "p", "planner")
     sc = FastPathScorer.__new__(FastPathScorer)  # controller logic only
     sc.enforce, sc.scorer_set = True, {}
-    sc.pending = {("s", "p"): (2, 1e-4)}
+    sc.pending = {("s", "p"): (2, 1e-4, "fast")}
     sc.controller(gw, "s")
     assert gw.agent_tier("s", "p") is Tier.CONSTRAINED
-    sc.pending = {("s", "p"): (1, 0.5)}
+    sc.pending = {("s", "p"): (1, 0.5, "fast")}
     sc.controller(gw, "s")
     assert gw.agent_tier("s", "p") is Tier.ELEVATED
     gw.set_tier("s", "p", Tier.QUARANTINED, "rule")  # a rule escalation…
-    sc.pending = {("s", "p"): (0, 0.9)}
+    sc.pending = {("s", "p"): (0, 0.9, "fast")}
     sc.controller(gw, "s")
     assert gw.agent_tier("s", "p") is Tier.QUARANTINED  # …is never relaxed by the scorer
 
@@ -137,7 +137,7 @@ def test_fastpath_calibrated_and_detects_loops(model):
     assert st.below[("fused", 1e-2)] / st.n <= 2e-2  # within 2x nominal
     # tiny calibration sets (≈ hundreds of scores per role) cap how small p can get,
     # so check for Tier 1 flags here; the full-size run is in docs/results/phase3-fastpath.md
-    flagged = {sid for sid, _agent, _idx, _p, lvl in sc.alerts if lvl >= 1}
+    flagged = {alert[0] for alert in sc.alerts if alert[4] >= 1}
     assert sum(lab.session_id in flagged for lab in s.labels) >= 6
 
 
@@ -148,3 +148,14 @@ def test_enforcing_scorer_feeds_back_into_gate(model):
              controllers=[sc.controller])
     changes = [e for e in events if e.kind is EventKind.TIER_CHANGE and (e.reason or "").startswith("fast path")]
     assert changes, "scorer should escalate at least one loop agent"
+
+
+def test_detector_families_have_independent_streaks():
+    sc = FastPathScorer.__new__(FastPathScorer)
+    sc.thresholds, sc.machines, sc.levels = TierMachine().th, {}, {}
+    sc.pending, sc.alerts, sc.escalations = {}, [], []
+    sc.update_tier("s", "a", 1, 5e-5, "fast")
+    sc.update_tier("s", "a", 2, 0.9, "deep")  # a routine snapshot in between…
+    sc.update_tier("s", "a", 3, 5e-5, "fast")  # …must not break the fast path's T3 streak
+    assert sc.levels[("s", "a")] == 3
+    assert [e[5] for e in sc.escalations] == ["fast", "fast"]

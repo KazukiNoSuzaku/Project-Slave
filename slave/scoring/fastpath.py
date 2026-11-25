@@ -124,38 +124,55 @@ class FastPathScorer:
         self.enforce = enforce
         self.thresholds = thresholds
         self.fx = FeatureExtractor(model.baseline)
-        self.machines: dict[tuple[str, str], TierMachine] = {}
-        self.pending: dict[tuple[str, str], tuple[int, float]] = {}
+        # One tier machine per (agent, detector family): each family keeps its own
+        # streaks and quiet counts; the agent's tier is the max across families.
+        self.machines: dict[tuple[str, str], dict[str, TierMachine]] = {}
+        self.levels: dict[tuple[str, str], int] = {}
+        self.pending: dict[tuple[str, str], tuple[int, float, str]] = {}
         self.scorer_set: dict[tuple[str, str], int] = {}
         self.benign_stats = ScoreStats()
-        self.alerts: list[tuple[str, str, int, float, int]] = []  # (session, agent, idx, p*, level)
+        self.alerts: list[tuple[str, str, int, float, int, str]] = []  # (session, agent, idx, p*, level, source)
+        # tier *increases* only, attributed to the scorer whose p* caused them
+        self.escalations: list[tuple[str, str, int, float, int, str]] = []
 
     def __call__(self, ev: Event) -> None:
+        self.score_event(ev)
+
+    def score_event(self, ev: Event) -> float | None:
+        """Score one event on the fast path; returns p* for scored actions."""
         s = self.fx.process(ev)
         if s is None:
-            return
+            return None
         ps = self.model.p_values(s)
         p_star = fuse(list(ps.values()))
         if not s.session_id.startswith("atk-"):
             self.benign_stats.add(ps | {"fused": p_star})
-        key = (s.session_id, s.agent_id)
-        machine = self.machines.setdefault(key, TierMachine(self.thresholds))
-        before = machine.level
-        level = machine.update(p_star)
+        self.update_tier(s.session_id, s.agent_id, s.idx, p_star)
+        return p_star
+
+    def update_tier(self, session_id: str, agent_id: str, idx: int, p_star: float, source: str = "fast") -> None:
+        key = (session_id, agent_id)
+        families = self.machines.setdefault(key, {})
+        families.setdefault(source, TierMachine(self.thresholds)).update(p_star)
+        before = self.levels.get(key, 0)
+        level = max(m.level for m in families.values())
+        self.levels[key] = level
         if level != before:
-            self.pending[key] = (level, p_star)
+            self.pending[key] = (level, p_star, source)
+        if level > before:
+            self.escalations.append((session_id, agent_id, idx, p_star, level, source))
         if level >= 1:
-            self.alerts.append((s.session_id, s.agent_id, s.idx, p_star, level))
+            self.alerts.append((session_id, agent_id, idx, p_star, level, source))
 
     def controller(self, gw: Gateway, session_id: str) -> None:
         if not self.enforce or not self.pending:
             return
         for key in [k for k in self.pending if k[0] == session_id]:
-            level, p_star = self.pending.pop(key)
+            level, p_star, source = self.pending.pop(key)
             current = gw.agent_tier(*key)
             if current is None:
                 continue
-            reason = f"fast path p*={p_star:.1e}"
+            reason = f"{source} path p*={p_star:.1e}"
             if level > current:
                 gw.set_tier(*key, Tier(level), reason)
                 self.scorer_set[key] = level

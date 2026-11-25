@@ -113,6 +113,7 @@ class RungResult:
     benign_blocks: Counter = field(default_factory=Counter)
     benign_max_tier: Counter = field(default_factory=Counter)  # highest tier reached per benign session
     scorers: list[Any] = field(default_factory=list)
+    labels: list[AttackLabel] = field(default_factory=list)
     elapsed_s: float = 0.0
 
     @property
@@ -153,6 +154,7 @@ def run_rung(rung: Rung, seeds: list[int], n_benign: int, n_attacks: int,
                            attacks=ATTACKS, attacks_per_type=n_attacks, controllers=controllers)
         if scorer:
             out.scorers.append(scorer)
+        out.labels.extend(summary.labels)
         attacked = {lab.session_id for lab in summary.labels}
         for lab in summary.labels:
             score_attack(lab, col.sessions[lab.session_id], out.attacks[lab.attack])

@@ -2,6 +2,7 @@
 
     slave-eval phase2 --seeds 5 --benign 2000 --attacks 40 --out docs/results/phase2-ablation.md
     slave-eval phase3 --seeds 5 --benign 2000 --attacks 40 --out docs/results/phase3-fastpath.md
+    slave-eval phase4 --seeds 5 --benign 2000 --attacks 40 --out docs/results/phase4-gae.md
 """
 
 from __future__ import annotations
@@ -10,7 +11,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from slave.eval import phase3
+from slave.eval import phase3, phase4
 from slave.eval.phase2 import RUNGS, render, run_rung
 
 
@@ -43,6 +44,19 @@ def cmd_phase3(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_phase4(args: argparse.Namespace) -> int:
+    seeds = list(range(1, args.seeds + 1))
+    res = phase4.run(seeds, args.benign, args.attacks, args.train, args.gae_sessions, args.epochs, args.variants,
+                     log=lambda m: print(m, file=sys.stderr, flush=True))
+    report = phase4.render(res, seeds, args.benign, args.attacks)
+    if args.out:
+        Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.out).write_text(report)
+        print(f"wrote {args.out}", file=sys.stderr)
+    print(report)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="slave-eval")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -60,6 +74,16 @@ def main(argv: list[str] | None = None) -> int:
     h.add_argument("--train", type=int, default=6000, help="benign sessions per training split")
     h.add_argument("--out", help="write the markdown report here")
     h.set_defaults(fn=cmd_phase3)
+    k = sub.add_parser("phase4", help="graph-autoencoder deep path: train variants, evaluate rungs R3–R6")
+    k.add_argument("--seeds", type=int, default=5)
+    k.add_argument("--benign", type=int, default=2000)
+    k.add_argument("--attacks", type=int, default=40)
+    k.add_argument("--train", type=int, default=10000, help="benign sessions per training split")
+    k.add_argument("--gae-sessions", type=int, default=3000, help="sessions of split B used to train each GAE")
+    k.add_argument("--epochs", type=int, default=8)
+    k.add_argument("--variants", nargs="*", default=["v1", "v2a", "v2b"], choices=["v1", "v2a", "v2b"])
+    k.add_argument("--out", help="write the markdown report here")
+    k.set_defaults(fn=cmd_phase4)
     args = p.parse_args(argv)
     return args.fn(args)
 
