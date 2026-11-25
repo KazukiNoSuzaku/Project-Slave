@@ -51,7 +51,7 @@ Regenerate with `uv run slave-eval phase3` (see `slave/eval/phase3.py`).
 
 ## Model
 
-Trained on 18,000 benign sessions (seeds (101, 102, 103); 6,000 each for the transition baseline, the Half-Space Trees and calibration) in 10s. There is one HST per role (25 trees, height 8) over 19 features. Two detectors are calibrated per role: the HST score and the transition surprisal. They are fused as p* = min(1, 2·min p).
+Trained on 18,000 benign sessions (seeds (101, 102, 103); 6,000 each for the transition baseline, the Half-Space Trees and calibration) in 16s. There is one HST per role (25 trees, height 8) over 19 features. Two detectors are calibrated per role: the HST score and the transition surprisal. They are fused as p* = min(1, 2·min p).
 
 Calibration scores per role: coder 32,763 (min p 3e-05), data_analyst 11,262 (min p 9e-05), ops 8,239 (min p 1e-04), planner 25,110 (min p 4e-05), researcher 30,186 (min p 3e-05), reviewer 8,151 (min p 1e-04). The fused p* is at least 2/(n+1), so a role needs more than about 20,000 calibration scores before the fast path alone can push it to Tier 3 (p* < 1e-4).
 

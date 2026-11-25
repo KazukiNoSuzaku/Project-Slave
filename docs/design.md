@@ -139,6 +139,8 @@ Prompt injection enters through *content*. Graph topology alone can't see "this 
 
 **Measured (Phase 3):** see [results/phase3-fastpath.md](results/phase3-fastpath.md). The behavioural fast path raises prevention from 75% to 87% and detects A5 and A7, which no gate rule catches. Calibration holds within 2× of nominal. With p* = 2·min p, a role needs more than about 20,000 calibration scores before the fast path alone can reach Tier 3.
 
+**Measured (Phase 4):** see [results/phase4-gae.md](results/phase4-gae.md). Adding GAE v1 raises prevention to 90% (A7: 44% → 73%) by corroborating fast-path flags, at about twice the benign Tier ≥2 rate. v2a is the balanced option (88%). v2b (GRU) is not adopted: it doesn't beat v2a on A6. Two implementation decisions came out of this phase. The snapshot stride is scaled to 10 s for simulated sessions. Each detector family (fast, deep) keeps its own tier machine per agent, and the agent tier is the max. With one shared machine, routine scores from one family reset the other's Tier 3 streak.
+
 **Known limitation — label creep:** conservative propagation over-taints long sessions. We measure an **over-taint rate** (benign calls blocked by P1–P3) as a first-class metric and evaluate two mitigations: per-agent context resets on task boundaries, and sanitizer declassification.
 
 ---

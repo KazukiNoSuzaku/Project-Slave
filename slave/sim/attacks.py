@@ -164,10 +164,11 @@ def a7_mimicry_chain(c: Ctx, planner: str) -> None:
     c.call(r, "web_fetch", url=f"{EVIL}/library-docs")
     if not _delivered(c, r, planner, report=True):
         return
+    c.compromise(planner)  # the planner acts on the injected summary from here on
     coder = c.spawn(planner, "coder")
     if not coder:
         return
-    c.compromise(planner, coder)
+    c.compromise(coder)
     if not _delivered(c, planner, coder):
         return
     target = c.rng.choice(FILES)

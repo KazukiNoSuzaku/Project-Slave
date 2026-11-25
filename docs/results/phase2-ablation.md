@@ -58,4 +58,4 @@ Regenerate with `uv run slave-eval phase2` (see `slave/eval/phase2.py`).
 - **Structured reports trade safety for usability.** Declassifying the trust of schema-validated summaries assumes an injection cannot ride inside the structured fields. A1 shows the cost if that assumption fails: prevention falls to 0%.
 - **What the gate cannot see.** A5 (message loop) and A7 (mimicry through the normal delegation chain) pass every rung except where noted. They are the targets for the Phase 3 behavioural detectors. Lowering the P1 threshold catches A7, but blocks benign work in about 17% of sessions.
 
-_Run time: 12s._
+_Run time: 13s._

@@ -16,7 +16,7 @@ The full design is in [docs/design.md](docs/design.md).
 | **Phase 1:** gateway, static policy and caps, hash-chained event store, benign simulator | done: `slave/gateway`, `slave/store`, `slave/sim/swarm.py` |
 | **Phase 2:** provenance labels, rules P1–P3, attack library A1–A8, ablation harness | done: `slave/gateway`, `slave/sim/attacks.py`, `slave/eval`, [results](docs/results/phase2-ablation.md) |
 | **Phase 3:** fast-path features, Half-Space Trees, conformal calibration, tiers with hysteresis | done: `slave/features`, `slave/scoring`, [results](docs/results/phase3-fastpath.md) |
-| Phase 4: heterogeneous graph autoencoder | next |
+| **Phase 4:** heterogeneous graph autoencoder (v1 / v2a / v2b), hybrid scorer | done: `slave/graph`, `slave/scoring/hybrid.py`, [results](docs/results/phase4-gae.md) |
 | Phase 5: enforcement (quarantine semantics, compensation, release) | not started |
 
 ## Phase 1: gateway, event store, benign simulator
@@ -97,6 +97,26 @@ Headline results (5 seeds, 10,000 benign sessions and 1,600 attack sessions per 
 | R3 + context reset | 86% | 50% / 100% | 38% / 100% | 0.06% |
 
 Calibration exit criterion met: on held-out benign traffic, every detector's empirical rate at α ∈ {1e-2, 1e-3, 1e-4} stays within 2× of α. The fused score sits at or below nominal. Caveats are in the report.
+
+## Phase 4: graph-autoencoder deep path
+
+```bash
+uv run slave-eval phase4 --seeds 5 --benign 2000 --attacks 40 --out docs/results/phase4-gae.md   # ~20 min on a laptop CPU
+```
+
+- **Snapshots** (`slave/graph/snapshot.py`): each 5-minute window of a session becomes a typed, directed graph. Agents, tools and stores are nodes. Message, spawn, call and access edges are collapsed with counts and attributes, and reverse relations are added.
+- **Model** (`slave/graph/gae.py`): a heterogeneous DOMINANT-style autoencoder. Neighbour messages are combined with mean, max and spread, and the structure decoder is asymmetric and bilinear. It also reconstructs edge and node attributes. Variants: v1 static, v2a with whole-session aggregates, v2b with a per-agent GRU memory.
+- **Hybrid scorer** (`slave/scoring/hybrid.py`): the deep path runs every 10 s of session time, or immediately when the fast path flags an action. Each detector family has its own tier machine per agent, and the agent's tier is the higher of the two.
+
+| Rung | Attacks prevented | A7 mimicry | Benign sessions at Tier ≥2 |
+|---|---|---|---|
+| R3: fast path | 87% | 44% | 0.74% |
+| R2 + GAE alone | 75% | 0% | 0.72% |
+| **R4: R3 + GAE v1** | **90%** | **73%** | 1.40% |
+| R5: R3 + GAE v2a | 88% | 60% | 0.90% |
+| R6: R3 + GAE v2b (GRU) | 86% | 43% | 1.07% |
+
+The GAE mostly *corroborates* the fast path. After the fast path flags a poisoned message, a snapshot catches the compromised planner and stops the chain. v1 buys the most A7 prevention at about twice the benign Tier ≥2 rate. v2a is the balanced choice. v2b is not adopted (design §6.4). The deep path's p99 latency is under 2 ms. Findings and caveats are in [the report](docs/results/phase4-gae.md).
 
 ## Ops Terminal dashboard
 
