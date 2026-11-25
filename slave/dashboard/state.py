@@ -92,6 +92,7 @@ class DashboardState:
         self.denials: deque[datetime] = deque()
         self.gate_latency: deque[float] = deque(maxlen=LATENCY_SAMPLES)
         self.rule_hits: Counter = Counter()
+        self.incidents: deque[dict[str, Any]] = deque(maxlen=200)
         self.event_count = 0
         self.now: datetime | None = None
 
@@ -115,7 +116,8 @@ class DashboardState:
             line = {"ts": event.ts.isoformat(), "level": level, "session": event.session_id, "msg": msg}
             lines.append(line)
 
-        src = sess.agent(event.src_id) if event.kind is not EventKind.DATA_ACCESS else None
+        gateway_sourced = event.kind in (EventKind.DATA_ACCESS, EventKind.NOTICE, EventKind.COMPENSATE)
+        src = None if gateway_sourced else sess.agent(event.src_id)
         if src is not None and event.src_role and not src.role:
             src.role = event.src_role
 
@@ -170,7 +172,15 @@ class DashboardState:
                 emit(f"TIER{int(event.tier)}", f"{event.src_id} {verb}"
                      + (f" — {event.reason}" if event.reason else ""))
             case EventKind.TERMINATE:
-                emit("INFO", f"TERMINATE {event.src_id}")
+                emit("INFO", f"TERMINATE {event.src_id}" + (f" ({event.reason})" if event.reason else ""))
+            case EventKind.INCIDENT:
+                self.incidents.append({"ts": event.ts.isoformat(), "session": event.session_id,
+                                       "agent": event.src_id, "summary": event.reason})
+                emit("INCDT", event.reason or f"incident on {event.src_id}")
+            case EventKind.NOTICE:
+                emit("NOTE", f"→ {event.dst_id}: {event.reason}")
+            case EventKind.COMPENSATE:
+                emit("UNDO", event.reason or f"compensation {event.dst_id}")
             case EventKind.CONTEXT_RESET:
                 src.taint.clear()
                 emit("INFO", f"context reset {event.src_id} ({event.reason})")
@@ -226,6 +236,7 @@ class DashboardState:
             "kpis": self.kpis(),
             "quarantined": self.quarantined(),
             "rule_hits": dict(self.rule_hits),
+            "incidents": list(self.incidents)[-20:],
             "sessions": [s.to_dict() for s in sessions[:SNAPSHOT_SESSIONS]],
             "log": list(self.log)[-log_tail:],
         }

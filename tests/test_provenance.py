@@ -78,7 +78,7 @@ def test_p2_blocks_pii_egress_and_quarantines():
     resp = gw.call_tool("s", "ops", "send_email", {"to": "x"})
     assert (resp.allowed, resp.rule) == (False, "P2")
     assert agent(gw, "ops").tier is Tier.QUARANTINED
-    assert events[-1].kind is EventKind.TIER_CHANGE
+    assert [e.kind for e in events[-3:]] == [EventKind.TIER_CHANGE, EventKind.INCIDENT, EventKind.NOTICE]
 
 
 def test_p3_confused_deputy_only_for_untrusted_requests():

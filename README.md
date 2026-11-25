@@ -17,7 +17,7 @@ The full design is in [docs/design.md](docs/design.md).
 | **Phase 2:** provenance labels, rules P1–P3, attack library A1–A8, ablation harness | done: `slave/gateway`, `slave/sim/attacks.py`, `slave/eval`, [results](docs/results/phase2-ablation.md) |
 | **Phase 3:** fast-path features, Half-Space Trees, conformal calibration, tiers with hysteresis | done: `slave/features`, `slave/scoring`, [results](docs/results/phase3-fastpath.md) |
 | **Phase 4:** heterogeneous graph autoencoder (v1 / v2a / v2b), hybrid scorer | done: `slave/graph`, `slave/scoring/hybrid.py`, [results](docs/results/phase4-gae.md) |
-| Phase 5: enforcement (quarantine semantics, compensation, release) | not started |
+| **Phase 5:** enforcement: quarantine semantics, session freeze, compensation journal, release, chaos test | done: `slave/enforcement`, `slave/gateway`, [results](docs/results/phase5-enforcement.md) |
 
 ## Phase 1: gateway, event store, benign simulator
 
@@ -64,7 +64,7 @@ Headline results (5 seeds, 10,000 benign sessions and 1,600 attack sessions per 
 | Rung | Attacks prevented | Benign sessions with ≥1 block |
 |---|---|---|
 | R1: static policy and caps | 14% (A4 only) | 0% |
-| R2: + provenance rules | 75% | 1.2% |
+| R2: + provenance rules | 75% | 1.4% |
 | R2 + context reset between tasks | 75% | 0% |
 | R2 + reset + structured reports | 62% (A1 gets through again) | 0% |
 | R2 with stricter P1 | 88% (catches A7) | 17% |
@@ -92,9 +92,11 @@ Headline results (5 seeds, 10,000 benign sessions and 1,600 attack sessions per 
 
 | Rung | Attacks prevented | A5 loop | A7 mimicry | Benign sessions at Tier ≥2 |
 |---|---|---|---|---|
-| R2: gate rules | 75% | 0% prevented, 0% detected | 0% prevented, 0% detected | 0.48% |
-| **R3: + fast path** | **87%** | 51% prevented, 100% detected | 46% prevented, 100% detected | 0.93% |
-| R3 + context reset | 86% | 50% / 100% | 38% / 100% | 0.06% |
+| R2: gate rules | 75% | 0% prevented, 0% detected | 0% prevented, 0% detected | 0.54% |
+| **R3: + fast path** | **93%** | 100% prevented, 100% detected | 40% prevented, 100% detected | 0.85% |
+| R3 + context reset | 93% | 100% / 100% | 43% / 100% | 0.11% |
+
+These are with Phase 5's enforcement semantics. A fast-path Tier 3 on the looping planner freezes the session, which is why A5 is fully prevented. Before Phase 5, Tier 3 only blocked individual actions and A5 prevention was 51%.
 
 Calibration exit criterion met: on held-out benign traffic, every detector's empirical rate at α ∈ {1e-2, 1e-3, 1e-4} stays within 2× of α. The fused score sits at or below nominal. Caveats are in the report.
 
@@ -110,13 +112,32 @@ uv run slave-eval phase4 --seeds 5 --benign 2000 --attacks 40 --out docs/results
 
 | Rung | Attacks prevented | A7 mimicry | Benign sessions at Tier ≥2 |
 |---|---|---|---|
-| R3: fast path | 87% | 44% | 0.74% |
-| R2 + GAE alone | 75% | 0% | 0.72% |
-| **R4: R3 + GAE v1** | **90%** | **73%** | 1.40% |
-| R5: R3 + GAE v2a | 88% | 60% | 0.90% |
-| R6: R3 + GAE v2b (GRU) | 86% | 43% | 1.07% |
+| R3: fast path | 92% | 40% | 0.95% |
+| R2 + GAE alone | 75% | 0% | 0.59% |
+| **R4: R3 + GAE v1** | **97%** | **74%** | 1.04% |
+| R5: R3 + GAE v2a | 93% | 40% | 1.18% |
+| R6: R3 + GAE v2b (GRU) | 94% | 52% | 1.44% |
 
-The GAE mostly *corroborates* the fast path. After the fast path flags a poisoned message, a snapshot catches the compromised planner and stops the chain. v1 buys the most A7 prevention at about twice the benign Tier ≥2 rate. v2a is the balanced choice. v2b is not adopted (design §6.4). The deep path's p99 latency is under 2 ms. Findings and caveats are in [the report](docs/results/phase4-gae.md).
+The GAE mostly *corroborates* the fast path. After the fast path flags a poisoned message, a snapshot catches the compromised planner and stops the chain. v1 is the clear winner: it adds about 34 points of A7 prevention for a small rise in benign Tier ≥2 (0.95% → 1.04%, intervals overlapping). With Phase 5's enforcement, v2a no longer beats the fast path alone. v2b is not adopted (design §6.4). The deep path's p99 latency is under 2 ms. Findings and caveats are in [the report](docs/results/phase4-gae.md).
+
+## Phase 5: enforcement and quarantine
+
+```bash
+uv run slave-eval phase5 --seeds 5 --benign 2000 --attacks 40 --out docs/results/phase5-enforcement.md   # ~20 min
+```
+
+- **Tier 1** records full call arguments and applies a soft rate limit (20 calls/min).
+- **Tier 2** revokes mutating and egress tools and spawning. Denied calls carry a machine-readable `POLICY_DENIED` or `APPROVAL_REQUIRED` code.
+- **Tier 3 (quarantine)** does four things. The agent's spawn subtree is terminated. An incident is opened with every journaled mutating or egress call in the last 5 minutes and its compensation (or "irreversible"). The parent receives an `AGENT_QUARANTINED` notice, so it reroutes instead of waiting. Messages to the quarantined agent fail fast with `DST_UNAVAILABLE`.
+- **Compromised orchestrator:** if the root, or an agent whose parent is already at Tier ≥2, is quarantined, the whole session is frozen and a human is paged.
+- **Humans close the loop.** `Gateway.release()` is the only way out of Tier 3. It unfreezes the session if needed, and the scorers restart that agent's tier machines and keep its recent scores as calibration feedback. `Gateway.confirm(incident, undo_agents=…)` runs compensations only for the named agents' changes.
+
+| Exit criterion | Result |
+|---|---|
+| Zero benign-sibling hangs (chaos test, 2,936 random quarantines) | **0 hangs.** The negative control without notices: 2,385 |
+| Quarantine ≤100 ms after the scorer decides | **p99 4.3 ms** (633 scorer-driven quarantines) |
+
+Findings and caveats are in [the report](docs/results/phase5-enforcement.md). The main open issue: a scorer false positive on the root orchestrator freezes the whole session, which happens in every A2 session. The report recommends requiring corroboration before a scorer alone can freeze a session.
 
 ## Ops Terminal dashboard
 

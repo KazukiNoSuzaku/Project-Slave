@@ -11,7 +11,11 @@ Rules are evaluated in order; the first that fires decides.
 | P2 | context holds pii/restricted data ∧ tool is external egress | deny + escalate to Tier 3 |
 | P1 | context is untrusted ∧ tool mutates or egresses ∧ sensitivity ≥ threshold | require human approval |
 | P3 | an *untrusted*, lower-privilege agent recently asked this agent (message or spawn) ∧ the call's sensitivity exceeds the requester's privilege | deny + escalate to Tier 2 |
-| P4 | caps: spawn depth, fan-out, spawn rate, call rate, identical-call repeats | deny |
+| P4 | caps: spawn depth, fan-out, spawn rate, call rate (lower at Tier 1), identical-call repeats | deny |
+
+Before any of these: actions by terminated agents (TERMINATED) and by any agent
+in a frozen session (FROZEN) are denied, and messages to a quarantined or
+terminated agent fail fast with DST_UNAVAILABLE.
 
 P1–P3 read the agent's provenance label (`AgentState.trust`, `.labels`),
 which the gateway maintains. They are active only when `ProvenanceRules` is
@@ -42,6 +46,7 @@ class Caps:
     max_spawns_per_minute: int = 12  # per session
     max_calls_per_minute: int = 60  # per agent
     max_identical_calls: int = 6  # same (tool, args) per agent within the window
+    max_calls_per_minute_elevated: int = 20  # Tier 1 soft rate limit
     window: timedelta = timedelta(minutes=1)
 
 
@@ -76,6 +81,7 @@ class AgentState:
     trust: Trust = Trust.SYSTEM
     labels: set[str] = field(default_factory=set)
     untrusted_requests: deque[Request] = field(default_factory=deque)
+    terminated: bool = False  # killed as part of a quarantined subtree
 
 
 @dataclass
@@ -83,6 +89,7 @@ class SessionState:
     session_id: str
     agents: dict[str, AgentState] = field(default_factory=dict)
     recent_spawns: deque[datetime] = field(default_factory=deque)
+    frozen: bool = False  # whole session halted (compromised orchestrator); human release only
 
 
 @dataclass(frozen=True)
@@ -118,12 +125,14 @@ class Policy:
 
     def check_tool(self, sess: SessionState, agent: AgentState, tool: ToolSpec | None, tool_name: str,
                    args: dict, args_hash: str, now: datetime) -> Verdict:
+        if (v := self._alive(sess, agent)):
+            return v
         if (v := self._tier(agent, risky=tool is None or tool.side_effect is not SideEffect.READ_ONLY)):
             return v
         role = self.registry.roles[agent.role]
         if tool is None:
             return _deny("S1", f"unknown tool {tool_name}")
-        if tool_name not in role.tools:
+        if tool_name not in role.tools:  # also keeps agents off the system-only compensation tools
             return _deny("S1", f"role {agent.role} may not call {tool_name}")
         if tool.uses_store and self.registry.store_for(tool, args) is None:
             return _deny("S1", f"unknown store {args.get('store')!r}")
@@ -155,14 +164,17 @@ class Policy:
     def _call_caps(self, agent: AgentState, tool_name: str, args_hash: str, now: datetime) -> Verdict:
         caps = self.caps
         _trim(agent.recent_calls, now, caps.window, key=lambda x: x[0])
-        if len(agent.recent_calls) >= caps.max_calls_per_minute:
-            return _deny("P4", f"call rate > {caps.max_calls_per_minute}/min")
+        limit = caps.max_calls_per_minute_elevated if agent.tier is Tier.ELEVATED else caps.max_calls_per_minute
+        if len(agent.recent_calls) >= limit:
+            return _deny("P4", f"call rate > {limit}/min" + (" (Tier 1 soft limit)" if agent.tier is Tier.ELEVATED else ""))
         repeats = sum(1 for _, h in agent.recent_calls if h == args_hash)
         if repeats >= caps.max_identical_calls:
             return _deny("P4", f"identical {tool_name} call repeated {repeats + 1}×")
         return ALLOW
 
     def check_spawn(self, sess: SessionState, parent: AgentState, child_role: str, now: datetime) -> Verdict:
+        if (v := self._alive(sess, parent)):
+            return v
         if (v := self._tier(parent, risky=True)):
             return v
         role = self.registry.roles[parent.role]
@@ -180,10 +192,23 @@ class Policy:
             return _deny("P4", f"spawn rate > {caps.max_spawns_per_minute}/min")
         return ALLOW
 
-    def check_message(self, sender: AgentState) -> Verdict:
+    def check_message(self, sess: SessionState, sender: AgentState, receiver: AgentState) -> Verdict:
+        if (v := self._alive(sess, sender)):
+            return v
         if sender.tier is Tier.QUARANTINED:
             return _deny("T3", "sender quarantined")
+        if receiver.terminated or receiver.tier is Tier.QUARANTINED:
+            # fail fast with a structured reason instead of leaving the sender waiting
+            return _deny("DST_UNAVAILABLE", f"{receiver.agent_id} is quarantined")
         return ALLOW
+
+    @staticmethod
+    def _alive(sess: SessionState, agent: AgentState) -> Verdict | None:
+        if agent.terminated:
+            return _deny("TERMINATED", "agent was terminated with a quarantined subtree")
+        if sess.frozen:
+            return _deny("FROZEN", "session frozen pending human review")
+        return None
 
     @staticmethod
     def _tier(agent: AgentState, *, risky: bool) -> Verdict | None:

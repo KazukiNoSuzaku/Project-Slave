@@ -15,7 +15,8 @@ action, so the gate enforces them from the agent's next action on.
 
 from __future__ import annotations
 
-from collections import Counter
+import time
+from collections import Counter, deque
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 
@@ -23,7 +24,7 @@ from river.anomaly import HalfSpaceTrees
 
 from slave.features.fastpath import FEATURES, Baseline, FeatureExtractor, Scored
 from slave.gateway import Gateway
-from slave.schema import Event, Tier
+from slave.schema import Event, EventKind, Tier
 from slave.scoring.calibration import ConformalCalibrator, fuse
 from slave.scoring.tiers import Thresholds, TierMachine
 
@@ -63,9 +64,18 @@ class FastPathModel:
         hst = model.score_one(self.scaler(s.features)) if model else 0.0
         return {"hst": hst, "transition": s.features["trans_surprisal"]}
 
-    def p_values(self, s: Scored) -> dict[str, float]:
-        raw = self.raw_scores(s)
+    def p_values(self, s: Scored, raw: dict[str, float] | None = None) -> dict[str, float]:
+        raw = raw if raw is not None else self.raw_scores(s)
         return {d: self.calibrators[d].p_value(s.role, raw[d]) for d in DETECTORS}
+
+    def apply_feedback(self, samples: Iterable[tuple[str, dict[str, float]]]) -> int:
+        """Add raw scores of human-released (benign) windows to the calibration sets (not training)."""
+        n = 0
+        for role, raw in samples:
+            for d in DETECTORS:
+                self.calibrators[d].insert(role, raw[d])
+            n += 1
+        return n
 
 
 # ---- training -----------------------------------------------------------------
@@ -128,22 +138,36 @@ class FastPathScorer:
         # streaks and quiet counts; the agent's tier is the max across families.
         self.machines: dict[tuple[str, str], dict[str, TierMachine]] = {}
         self.levels: dict[tuple[str, str], int] = {}
-        self.pending: dict[tuple[str, str], tuple[int, float, str]] = {}
+        self.pending: dict[tuple[str, str], tuple[int, float, str, float]] = {}  # level, p*, source, decided_at
         self.scorer_set: dict[tuple[str, str], int] = {}
         self.benign_stats = ScoreStats()
         self.alerts: list[tuple[str, str, int, float, int, str]] = []  # (session, agent, idx, p*, level, source)
         # tier *increases* only, attributed to the scorer whose p* caused them
         self.escalations: list[tuple[str, str, int, float, int, str]] = []
+        self.quarantine_latency_ms: list[float] = []  # Tier 3 decision → quarantine enforced (wall clock)
+        self.recent_raw: dict[tuple[str, str], deque] = {}  # last raw scores per agent, for release feedback
+        self.feedback: list[tuple[str, dict[str, float]]] = []
+        self.releases = 0
 
     def __call__(self, ev: Event) -> None:
+        self.observe_control(ev)
         self.score_event(ev)
+
+    def observe_control(self, ev: Event) -> None:
+        """React to human releases and terminations; every scorer variant calls this on every event."""
+        if ev.kind is EventKind.TIER_CHANGE and (ev.reason or "").startswith("released"):
+            self._on_release((ev.session_id, ev.src_id))
+        elif ev.kind is EventKind.TERMINATE:
+            self._forget((ev.session_id, ev.src_id))
 
     def score_event(self, ev: Event) -> float | None:
         """Score one event on the fast path; returns p* for scored actions."""
         s = self.fx.process(ev)
         if s is None:
             return None
-        ps = self.model.p_values(s)
+        raw = self.model.raw_scores(s)
+        ps = self.model.p_values(s, raw)
+        self.recent_raw.setdefault((s.session_id, s.agent_id), deque(maxlen=30)).append((s.role, raw))
         p_star = fuse(list(ps.values()))
         if not s.session_id.startswith("atk-"):
             self.benign_stats.add(ps | {"fused": p_star})
@@ -158,7 +182,7 @@ class FastPathScorer:
         level = max(m.level for m in families.values())
         self.levels[key] = level
         if level != before:
-            self.pending[key] = (level, p_star, source)
+            self.pending[key] = (level, p_star, source, time.perf_counter())
         if level > before:
             self.escalations.append((session_id, agent_id, idx, p_star, level, source))
         if level >= 1:
@@ -168,15 +192,28 @@ class FastPathScorer:
         if not self.enforce or not self.pending:
             return
         for key in [k for k in self.pending if k[0] == session_id]:
-            level, p_star, source = self.pending.pop(key)
+            level, p_star, source, decided_at = self.pending.pop(key)
             current = gw.agent_tier(*key)
-            if current is None:
+            if current is None or not gw.is_active(*key):
                 continue
             reason = f"{source} path p*={p_star:.1e}"
             if level > current:
                 gw.set_tier(*key, Tier(level), reason)
                 self.scorer_set[key] = level
-            elif level < current and self.scorer_set.get(key) == current:
+                if level == Tier.QUARANTINED:
+                    self.quarantine_latency_ms.append((time.perf_counter() - decided_at) * 1000)
+            elif level < current < Tier.QUARANTINED and self.scorer_set.get(key) == current:
                 # only relax tiers the scorer itself raised; rule-based escalations stay
                 gw.set_tier(*key, Tier(level), reason + " (hysteresis exit)")
                 self.scorer_set[key] = level
+
+    def _on_release(self, key: tuple[str, str]) -> None:
+        """A human released this agent: restart its tier machines and keep its recent scores as feedback."""
+        self.releases += 1
+        for d in (self.machines, self.levels, self.scorer_set, self.pending):
+            d.pop(key, None)
+        self.feedback.extend(self.recent_raw.get(key, ()))
+
+    def _forget(self, key: tuple[str, str]) -> None:
+        for d in (self.machines, self.levels, self.scorer_set, self.recent_raw):
+            d.pop(key, None)

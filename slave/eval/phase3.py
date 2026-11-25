@@ -20,7 +20,7 @@ from slave.eval.phase2 import (
     render as render_gate_tables,
     run_rung,
 )
-from slave.gateway import Policy
+from slave.gateway import Policy, ProvenanceRules
 from slave.registry import default_registry
 from slave.scoring.fastpath import DETECTORS, FastPathModel, FastPathScorer, ScoreStats, train
 from slave.sim.swarm import generate
@@ -29,8 +29,12 @@ TRAIN_SEEDS = (101, 102, 103)
 
 
 def _benign_events(n: int, seed: int) -> list:
+    """Benign training/calibration traffic, generated under the *same* gate policy the detectors are
+    evaluated with (R2: static rules + provenance). Calibrating on traffic without the provenance
+    rules breaks exchangeability: in deployment, P1–P3 blocks reshape a small share of sessions."""
     events: list = []
-    generate(n, seed=seed, extra_sinks=[events.append], policy=Policy(default_registry()))
+    generate(n, seed=seed, extra_sinks=[events.append],
+             policy=Policy(default_registry(), provenance=ProvenanceRules()))
     return events
 
 

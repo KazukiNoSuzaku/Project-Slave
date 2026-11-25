@@ -21,6 +21,7 @@ class ToolSpec:
     output_trust: Trust
     output_classes: frozenset[str] = frozenset()
     uses_store: bool = False  # args["store"] names a DataStore
+    compensation: str | None = None  # tool that undoes this one (None for read-only or irreversible)
 
 
 @dataclass(frozen=True)
@@ -64,15 +65,18 @@ def default_registry() -> Registry:
         ToolSpec("search", _RO, 0, _UNTRUSTED),
         ToolSpec("web_fetch", _RO, 0, _UNTRUSTED),
         ToolSpec("read_file", _RO, 1, _INTERNAL, uses_store=True),
-        ToolSpec("write_file", _MUT, 2, _INTERNAL, uses_store=True),
+        ToolSpec("write_file", _MUT, 2, _INTERNAL, uses_store=True, compensation="restore_file"),
         ToolSpec("git_diff", _RO, 1, _INTERNAL),
         ToolSpec("run_tests", _RO, 1, _INTERNAL),
-        ToolSpec("git_commit", _MUT, 2, _INTERNAL),
+        ToolSpec("git_commit", _MUT, 2, _INTERNAL, compensation="git_revert"),
         ToolSpec("sql_query", _RO, 2, _INTERNAL, uses_store=True),
         ToolSpec("read_logs", _RO, 1, _INTERNAL),
         ToolSpec("restart_service", _MUT, 3, _INTERNAL),
         ToolSpec("send_email", _EGR, 3, _INTERNAL),
         ToolSpec("http_post", _EGR, 3, _INTERNAL),
+        # system-only compensations: in no role's allowlist; run by the gateway after a human confirms
+        ToolSpec("restore_file", _MUT, 2, _INTERNAL, uses_store=True),
+        ToolSpec("git_revert", _MUT, 2, _INTERNAL),
     ]
     stores = [
         StoreSpec("repo", "internal", 1),

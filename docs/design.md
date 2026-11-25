@@ -137,9 +137,9 @@ Prompt injection enters through *content*. Graph topology alone can't see "this 
 
 **Measured (Phase 2):** see [results/phase2-ablation.md](results/phase2-ablation.md). Adding P1–P3 raises prevention across A1–A8 from 12% to 75%. 1.3% of benign sessions see at least one block, and a context reset between tasks removes all of those blocks in the simulator.
 
-**Measured (Phase 3):** see [results/phase3-fastpath.md](results/phase3-fastpath.md). The behavioural fast path raises prevention from 75% to 87% and detects A5 and A7, which no gate rule catches. Calibration holds within 2× of nominal. With p* = 2·min p, a role needs more than about 20,000 calibration scores before the fast path alone can reach Tier 3.
+**Measured (Phase 3):** see [results/phase3-fastpath.md](results/phase3-fastpath.md). The behavioural fast path raises prevention from 75% to 93% (with Phase 5 enforcement) and detects A5 and A7, which no gate rule catches. Calibration holds within 2× of nominal. With p* = 2·min p, a role needs more than about 20,000 calibration scores before the fast path alone can reach Tier 3.
 
-**Measured (Phase 4):** see [results/phase4-gae.md](results/phase4-gae.md). Adding GAE v1 raises prevention to 90% (A7: 44% → 73%) by corroborating fast-path flags, at about twice the benign Tier ≥2 rate. v2a is the balanced option (88%). v2b (GRU) is not adopted: it doesn't beat v2a on A6. Two implementation decisions came out of this phase. The snapshot stride is scaled to 10 s for simulated sessions. Each detector family (fast, deep) keeps its own tier machine per agent, and the agent tier is the max. With one shared machine, routine scores from one family reset the other's Tier 3 streak.
+**Measured (Phase 4):** see [results/phase4-gae.md](results/phase4-gae.md). Adding GAE v1 raises prevention to 97% (A7: 40% → 74%) by corroborating fast-path flags. The benign Tier ≥2 rate moves from 0.95% to 1.04%. v2a no longer adds measurable prevention once Phase 5 enforcement is in. v2b (GRU) is not adopted: it doesn't beat v2a on A6. **Recommended deployment: gate + fast path + GAE v1.** Two implementation decisions came out of this phase. The snapshot stride is scaled to 10 s for simulated sessions. Each detector family (fast, deep) keeps its own tier machine per agent, and the agent tier is the max. With one shared machine, routine scores from one family reset the other's Tier 3 streak.
 
 **Known limitation — label creep:** conservative propagation over-taints long sessions. We measure an **over-taint rate** (benign calls blocked by P1–P3) as a first-class metric and evaluate two mitigations: per-agent context resets on task boundaries, and sanitizer declassification.
 
@@ -310,6 +310,15 @@ Thresholds are starting points; the ablation reports the full ROC so they can be
 * **Compromised orchestrator (A8):** if $v$ is the session root, or $v$'s parent is itself at Tier ≥2, there is no trustworthy parent to notify → **freeze the whole session** and page a human.
 * **Actions already executed:** the gateway journals every mutating call. Tools may register a compensating action (e.g. `git revert`, soft-delete restore); on quarantine, compensations for $v$'s calls in the last window are proposed (human-confirmed). Non-reversible actions (sent email) are listed explicitly in the incident.
 * **False-positive recovery:** a `release` endpoint lets a reviewer restore an agent; the released windows, once reviewed, are added to the calibration set (not the training set) so the same benign pattern stops alerting.
+
+**As built and measured (Phase 5):** see [results/phase5-enforcement.md](results/phase5-enforcement.md). The chaos test shows zero sibling hangs across 2,936 random quarantines, against 2,385 when the parent notice is switched off. Quarantine is enforced within 4.3 ms (p99) of the scorer's decision. Refinements that came out of evaluation:
+
+1. Confirming an incident undoes only the changes of agents the reviewer names. In a frozen session, the incident's scope includes innocent agents.
+2. Each detector family keeps its own tier machine (Phase 4).
+3. Detectors are trained and calibrated on traffic generated under the deployed gate policy, including the provenance rules. Calibrating on rule-free traffic broke exchangeability.
+4. In the simulator, an agent stops acting once it is quarantined, terminated or frozen, as a real runtime would. Scoring the denied attempts of stopped agents had flooded the extreme tail with false alarms.
+
+Open issue: a scorer false positive on the root orchestrator freezes the whole session, which happens in every A2 session. The proposed fix is to require corroboration (a rule hit or both detector families) before a scorer alone can freeze a session.
 
 ---
 

@@ -21,8 +21,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
-from slave.gateway import Gateway, Policy, ToolOutput, ToolResponse, Verdict
-from slave.schema import Event, EventKind
+from slave.gateway import Gateway, GatewayError, Policy, ToolOutput, ToolResponse, Verdict
+from slave.schema import Event, EventKind, Tier
 from slave.store import EventStore
 
 SIM_EPOCH = datetime(2026, 1, 5, 9, 0, tzinfo=timezone.utc)
@@ -78,12 +78,12 @@ class AttackLabel:
     session_id: str
     attackers: set[str] = field(default_factory=set)
     first_malicious_idx: int | None = None
-    harm: list[tuple[int, bool]] = field(default_factory=list)  # (event index, executed?)
+    harm: list[tuple[int, bool, str]] = field(default_factory=list)  # (event index, executed?, tool | msg | spawn)
 
     @property
     def prevented(self) -> bool:
         """No harm action executed. An attack disrupted before its first harm action counts."""
-        return not any(executed for _, executed in self.harm)
+        return not any(executed for _, executed, _ in self.harm)
 
     @property
     def aborted(self) -> bool:
@@ -95,34 +95,63 @@ class Ctx:
     """Per-session helper: think time + id allocation around gateway calls."""
 
     def __init__(self, gw: Gateway, clock: SimClock, rng: random.Random, session_id: str,
-                 config: SimConfig = SimConfig(), label: AttackLabel | None = None) -> None:
+                 config: SimConfig = SimConfig(), label: AttackLabel | None = None,
+                 runtime: Counter | None = None) -> None:
         self.gw, self.clock, self.rng, self.sid = gw, clock, rng, session_id
         self.config = config
         self.label = label
         self.n_agents = 0
+        self.runtime = runtime if runtime is not None else Counter()  # rerouted / hangs / fast_fail
 
     def new_id(self, role: str) -> str:
         self.n_agents += 1
         return f"{role}-{self.n_agents:02d}"
+
+    def halted(self, agent: str) -> bool:
+        """A real agent runtime stops an agent that is quarantined, terminated or in a frozen session.
+
+        Scripts don't know that, so without this check they would keep issuing calls that
+        the gateway denies, and the scorers would score a stream of attempts no real
+        agent would make.
+        """
+        return not self.gw.is_active(self.sid, agent) or self.gw.agent_tier(self.sid, agent) is Tier.QUARANTINED
 
     def think(self, lo: float = 0.5, hi: float = 4.0) -> None:
         self.clock.advance(self.rng.uniform(lo, hi))
 
     def spawn(self, parent: str, role: str) -> str | None:
         child = self.new_id(role)
+        if self.halted(parent):
+            return None
         ok = self.gw.spawn(self.sid, parent, child, role).allowed
         self.think(0.2, 1.0)
         return child if ok else None
 
     def msg(self, src: str, dst: str, *, report: bool = False) -> Verdict:
         """`report=True`: a summary sent back up the tree (structured if configured)."""
-        v = self.gw.send(self.sid, src, dst, token_count=self.rng.randint(50, 1500),
-                         structured=report and self.config.structured_reports)
+        if self.halted(src):
+            v = Verdict("deny", "HALTED", f"{src} was stopped by its runtime")
+        else:
+            v = self.gw.send(self.sid, src, dst, token_count=self.rng.randint(50, 1500),
+                             structured=report and self.config.structured_reports)
+        if not v.allowed:
+            if v.rule == "DST_UNAVAILABLE":
+                self.runtime["fast_fail"] += 1  # sender learned immediately; nothing waits
+            elif report and v.rule in ("T3", "TERMINATED", "FROZEN", "HALTED"):
+                # `dst` is waiting for this report and it will never arrive.
+                if not self.gw.is_active(self.sid, dst) or self.gw.agent_tier(self.sid, dst) is Tier.QUARANTINED:
+                    self.runtime["dead_letter"] += 1  # the waiter is itself stopped: nobody hangs
+                elif self.gw.enforcer.has_notice(self.sid, dst, about=src):
+                    self.runtime["rerouted"] += 1  # AGENT_QUARANTINED told the parent to move on
+                else:
+                    self.runtime["hangs"] += 1  # a live parent would wait forever
         self.think(0.2, 1.5)
         return v
 
     def call(self, agent: str, tool: str, **args) -> ToolResponse:
         self.think(0.3, 3.0)
+        if self.halted(agent):
+            return ToolResponse(False, "HALTED", f"{agent} was stopped by its runtime")
         return self.gw.call_tool(self.sid, agent, tool, args)
 
     # ---- attack bookkeeping (ground truth) ----
@@ -141,22 +170,23 @@ class Ctx:
         assert self.label is not None
         self.think(0.3, 3.0)
         idx = self.gw.event_count(self.sid)
-        resp = self.gw.call_tool(self.sid, agent, tool, args)
-        self.label.harm.append((idx, resp.allowed))
+        resp = (ToolResponse(False, "HALTED", f"{agent} was stopped") if self.halted(agent)
+                else self.gw.call_tool(self.sid, agent, tool, args))
+        self.label.harm.append((idx, resp.allowed, tool))
         return resp
 
     def harm_msg(self, src: str, dst: str) -> bool:
         assert self.label is not None
         idx = self.gw.event_count(self.sid)
         ok = self.msg(src, dst).allowed
-        self.label.harm.append((idx, ok))
+        self.label.harm.append((idx, ok, "msg"))
         return ok
 
     def harm_spawn(self, parent: str, role: str) -> str | None:
         assert self.label is not None
         idx = self.gw.event_count(self.sid)
         child = self.spawn(parent, role)
-        self.label.harm.append((idx, child is not None))
+        self.label.harm.append((idx, child is not None, "spawn"))
         return child
 
 
@@ -175,7 +205,8 @@ def code_change(c: Ctx, planner: str) -> None:
     def edit_and_test() -> bool:
         for f in touched:
             c.call(coder, "write_file", store="repo", path=f)
-        return c.call(coder, "run_tests", suite="unit").output.status == "ok"
+        resp = c.call(coder, "run_tests", suite="unit")
+        return resp.allowed and resp.output.status == "ok"  # a denied call is a failed attempt, not a crash
 
     for _ in range(3):
         if edit_and_test():
@@ -273,6 +304,8 @@ def _pick_workflow(rng: random.Random) -> str:
 class SimSummary:
     sessions: int = 0
     labels: list[AttackLabel] = field(default_factory=list)
+    runtime: Counter = field(default_factory=Counter)  # rerouted, hangs, fast_fail, gateway_errors
+    gateway: Gateway | None = None
     events: int = 0
     workflows: Counter = field(default_factory=Counter)
     roles: Counter = field(default_factory=Counter)
@@ -289,11 +322,11 @@ AttackFn = Callable[[Ctx, str], None]
 
 
 def run_session(gw: Gateway, clock: SimClock, rng: random.Random, session_id: str,
-                config: SimConfig = SimConfig(), attack: tuple[str, AttackFn] | None = None
-                ) -> tuple[list[str], AttackLabel | None]:
+                config: SimConfig = SimConfig(), attack: tuple[str, AttackFn] | None = None,
+                runtime: Counter | None = None) -> tuple[list[str], AttackLabel | None]:
     """One session: 1–2 benign workflows; an attack session also runs its attack."""
     label = AttackLabel(attack[0], session_id) if attack else None
-    c = Ctx(gw, clock, rng, session_id, config, label)
+    c = Ctx(gw, clock, rng, session_id, config, label, runtime)
     planner = c.new_id("planner")
     gw.open_session(session_id, planner, "planner")
     c.call(planner, "read_file", store="docs", path="task.md")
@@ -317,7 +350,7 @@ def generate(n_sessions: int, seed: int = 1, store: EventStore | None = None,
              extra_sinks: list[Callable[[Event], Event | None]] | None = None, *,
              policy: Policy | None = None, config: SimConfig = SimConfig(),
              attacks: dict[str, AttackFn] | None = None, attacks_per_type: int = 0,
-             controllers: list | None = None) -> SimSummary:
+             controllers: list | None = None, notify_parent: bool = True) -> SimSummary:
     """Run `n_sessions` benign sessions plus `attacks_per_type` sessions of each attack, interleaved."""
     rng = random.Random(seed)
     clock = SimClock(SIM_EPOCH)
@@ -334,7 +367,7 @@ def generate(n_sessions: int, seed: int = 1, store: EventStore | None = None,
     sinks: list = [store] if store is not None else []
     sinks += [count, *(extra_sinks or [])]
     gw = Gateway(policy=policy, executor=FakeTools(rng), sinks=sinks, clock=clock, latency_in_events=False,
-                 controllers=controllers or ())
+                 controllers=controllers or (), notify_parent=notify_parent)
 
     plans: list[tuple[str, AttackFn] | None] = [None] * n_sessions
     for name, fn in (attacks or {}).items():
@@ -348,7 +381,15 @@ def generate(n_sessions: int, seed: int = 1, store: EventStore | None = None,
         start += timedelta(seconds=rng.expovariate(1 / 20))  # ~1 new session / 20 s
         clock.now = start
         prefix = "atk" if attack else "sim"
-        workflows, label = run_session(gw, clock, rng, f"{prefix}-{seed}-{i:06d}", config, attack)
+        sid = f"{prefix}-{seed}-{i:06d}"
+        try:
+            workflows, label = run_session(gw, clock, rng, sid, config, attack, summary.runtime)
+        except GatewayError:
+            # a protocol error is a crash from the agent runtime's point of view
+            summary.runtime["gateway_errors"] += 1
+            if sid in gw.sessions:
+                gw.close_session(sid)
+            workflows, label = [], None
         for wf in workflows:
             summary.workflows[wf] += 1
         if label:
@@ -363,4 +404,5 @@ def generate(n_sessions: int, seed: int = 1, store: EventStore | None = None,
     summary.gate_p50_ms = gw.latency_percentile(0.50)
     summary.gate_p99_ms = gw.latency_percentile(0.99)
     summary.gate_max_ms = max(gw.gate_latency_ms, default=None)
+    summary.gateway = gw
     return summary

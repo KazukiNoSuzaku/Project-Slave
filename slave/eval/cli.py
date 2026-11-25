@@ -3,6 +3,7 @@
     slave-eval phase2 --seeds 5 --benign 2000 --attacks 40 --out docs/results/phase2-ablation.md
     slave-eval phase3 --seeds 5 --benign 2000 --attacks 40 --out docs/results/phase3-fastpath.md
     slave-eval phase4 --seeds 5 --benign 2000 --attacks 40 --out docs/results/phase4-gae.md
+    slave-eval phase5 --seeds 5 --benign 2000 --attacks 40 --out docs/results/phase5-enforcement.md
 """
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from slave.eval import phase3, phase4
+from slave.eval import phase3, phase4, phase5
 from slave.eval.phase2 import RUNGS, render, run_rung
 
 
@@ -57,6 +58,25 @@ def cmd_phase4(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_phase5(args: argparse.Namespace) -> int:
+    seeds = list(range(1, args.seeds + 1))
+    log = lambda m: print(m, file=sys.stderr, flush=True)  # noqa: E731
+    chaos = [
+        phase5.run_chaos("notices on (non-root)", seeds, args.benign, rate=0.3, notify=True),
+        phase5.run_chaos("notices off (negative control)", seeds, args.benign, rate=0.3, notify=False),
+        phase5.run_chaos("root quarantined → freeze", seeds, args.benign, rate=0.1, notify=True, root=True),
+    ]
+    log("chaos done")
+    stack = phase5.run_stack(seeds, args.benign, args.attacks, args.train, args.gae_sessions, log=log)
+    report = phase5.render(chaos, stack, seeds, args.benign, args.attacks)
+    if args.out:
+        Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.out).write_text(report)
+        log(f"wrote {args.out}")
+    print(report)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="slave-eval")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -84,6 +104,14 @@ def main(argv: list[str] | None = None) -> int:
     k.add_argument("--variants", nargs="*", default=["v1", "v2a", "v2b"], choices=["v1", "v2a", "v2b"])
     k.add_argument("--out", help="write the markdown report here")
     k.set_defaults(fn=cmd_phase4)
+    m = sub.add_parser("phase5", help="enforcement: chaos test + full-stack quarantine / release / compensation")
+    m.add_argument("--seeds", type=int, default=5)
+    m.add_argument("--benign", type=int, default=2000)
+    m.add_argument("--attacks", type=int, default=40)
+    m.add_argument("--train", type=int, default=6000)
+    m.add_argument("--gae-sessions", type=int, default=3000)
+    m.add_argument("--out", help="write the markdown report here")
+    m.set_defaults(fn=cmd_phase5)
     args = p.parse_args(argv)
     return args.fn(args)
 

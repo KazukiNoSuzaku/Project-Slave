@@ -35,6 +35,10 @@ class ConformalCalibrator:
         self._frozen = True
         return self
 
+    def insert(self, stratum: str, score: float) -> None:
+        """Add one score to a frozen calibrator, keeping it sorted (release feedback)."""
+        bisect.insort(self.scores.setdefault(stratum, []), score)
+
     def n(self, stratum: str) -> int:
         return len(self.scores.get(stratum, ()))
 

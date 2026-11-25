@@ -74,6 +74,8 @@ pre.tree { margin: 6px 0 0; font: inherit; white-space: pre; overflow-x: auto; }
 .t2, .lv-TIER2 { color: var(--orange); }
 .t3, .lv-TIER3, .lv-DENY { color: var(--red); }
 .lv-HOLD { color: var(--orange); }
+.lv-INCDT { color: var(--red); font-weight: 700; }
+.lv-NOTE, .lv-UNDO { color: var(--amber); }
 .lv-INFO { color: var(--green); }
 .taint { color: var(--amber); }
 .deny { color: var(--red); }

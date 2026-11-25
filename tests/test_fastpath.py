@@ -106,14 +106,15 @@ def test_controller_only_relaxes_tiers_it_raised():
     gw.open_session("s", "p", "planner")
     sc = FastPathScorer.__new__(FastPathScorer)  # controller logic only
     sc.enforce, sc.scorer_set = True, {}
-    sc.pending = {("s", "p"): (2, 1e-4, "fast")}
+    sc.quarantine_latency_ms = []
+    sc.pending = {("s", "p"): (2, 1e-4, "fast", 0.0)}
     sc.controller(gw, "s")
     assert gw.agent_tier("s", "p") is Tier.CONSTRAINED
-    sc.pending = {("s", "p"): (1, 0.5, "fast")}
+    sc.pending = {("s", "p"): (1, 0.5, "fast", 0.0)}
     sc.controller(gw, "s")
     assert gw.agent_tier("s", "p") is Tier.ELEVATED
     gw.set_tier("s", "p", Tier.QUARANTINED, "rule")  # a rule escalation…
-    sc.pending = {("s", "p"): (0, 0.9, "fast")}
+    sc.pending = {("s", "p"): (0, 0.9, "fast", 0.0)}
     sc.controller(gw, "s")
     assert gw.agent_tier("s", "p") is Tier.QUARANTINED  # …is never relaxed by the scorer
 
@@ -159,3 +160,26 @@ def test_detector_families_have_independent_streaks():
     sc.update_tier("s", "a", 3, 5e-5, "fast")  # …must not break the fast path's T3 streak
     assert sc.levels[("s", "a")] == 3
     assert [e[5] for e in sc.escalations] == ["fast", "fast"]
+
+
+def test_release_resets_scorer_and_feedback_recalibrates(model):
+    events = []
+    generate(5, seed=40, extra_sinks=[events.append])
+    sc = FastPathScorer(model, enforce=False)
+    for ev in events:  # replay without TERMINATEs: the scorer frees per-agent state when a session ends
+        if ev.kind is not EventKind.TERMINATE:
+            sc(ev)
+    # pick an agent the scorer has seen, pretend it was quarantined, then released by a human
+    sid, agent = next(iter(sc.recent_raw))
+    sc.update_tier(sid, agent, 0, 1e-6)
+    sc.update_tier(sid, agent, 1, 1e-6)
+    assert sc.levels[(sid, agent)] == 3
+    sc.observe_control(Event(event_id=f"{sid}:999999", session_id=sid, ts=T0, kind=EventKind.TIER_CHANGE,
+                             src_id=agent, tier=Tier.NORMAL, reason="released by bob"))
+    assert (sid, agent) not in sc.levels and sc.releases == 1 and sc.feedback
+    role = sc.feedback[0][0]
+    before = model.calibrators["hst"].n(role)
+    assert model.apply_feedback(sc.feedback[:3]) == len(sc.feedback[:3])
+    assert model.calibrators["hst"].n(role) >= before + 1
+    xs = model.calibrators["hst"].scores[role]
+    assert xs == sorted(xs)

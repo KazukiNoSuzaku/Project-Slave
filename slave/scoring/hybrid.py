@@ -49,6 +49,7 @@ class HybridScorer(FastPathScorer):
         self.deep_latency_ms: list[float] = []
 
     def __call__(self, ev: Event) -> None:
+        self.observe_control(ev)
         p_fast = self.score_event(ev) if self.use_fast else None
         self.graphs.add(ev)
         sid = ev.session_id

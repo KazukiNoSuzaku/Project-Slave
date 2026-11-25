@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from enum import Enum, IntEnum
-from typing import Literal
+from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, Field, field_serializer
@@ -30,6 +30,9 @@ class EventKind(str, Enum):
     GATE_DECISION = "GATE_DECISION"
     SCORE = "SCORE"
     TIER_CHANGE = "TIER_CHANGE"
+    NOTICE = "NOTICE"  # synthetic message from the gateway, e.g. AGENT_QUARANTINED to the parent
+    INCIDENT = "INCIDENT"  # incident opened on quarantine / session freeze
+    COMPENSATE = "COMPENSATE"  # compensating action executed after human confirmation
 
 
 class NodeType(str, Enum):
@@ -92,6 +95,7 @@ class Event(BaseModel):
     side_effect: SideEffect | None = None
     sensitivity: int | None = None
     args_hash: str | None = None
+    args: dict[str, Any] | None = None  # full call arguments, captured only for agents at Tier >= 1
     status: Literal["ok", "error"] | None = None
     # TOOL_RESULT: label of the output. TOOL_CALL / MSG_SEND: the caller's
     # context label at the time of the action.
