@@ -11,6 +11,7 @@ dependencies = [
     "pydantic>=2.7",
     "duckdb>=1.1",
     "pyarrow>=17",
+    "river>=0.21",
 ]
 
 [project.scripts]

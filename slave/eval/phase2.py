@@ -18,7 +18,9 @@ import math
 import statistics
 import time
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import Any
 
 from slave.gateway import Policy, ProvenanceRules
 from slave.registry import default_registry
@@ -55,6 +57,7 @@ class SessionStats:
     gated: int = 0
     blocks: list[tuple[int, str, str]] = field(default_factory=list)  # (idx, agent, rule)
     escalations: list[tuple[int, str]] = field(default_factory=list)  # (idx, agent) tier >= 2
+    max_tier: int = 0
 
 
 class Collector:
@@ -67,8 +70,11 @@ class Collector:
             st.gated += 1
             if ev.decision != "allow":
                 st.blocks.append((_idx(ev), ev.src_id, ev.rule or "?"))
-        elif ev.kind is EventKind.TIER_CHANGE and ev.tier is not None and ev.tier >= 2:
-            self.sessions[ev.session_id].escalations.append((_idx(ev), ev.src_id))
+        elif ev.kind is EventKind.TIER_CHANGE and ev.tier is not None:
+            st = self.sessions[ev.session_id]
+            st.max_tier = max(st.max_tier, int(ev.tier))
+            if ev.tier >= 2:
+                st.escalations.append((_idx(ev), ev.src_id))
 
 
 def _idx(ev: Event) -> int:
@@ -91,6 +97,7 @@ def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
 class AttackResult:
     n: int = 0
     prevented: int = 0
+    aborted: int = 0
     detected: int = 0
     ttd: list[int] = field(default_factory=list)
     rules: Counter = field(default_factory=Counter)
@@ -104,6 +111,8 @@ class RungResult:
     benign_blocked_sessions: int = 0
     benign_gated: int = 0
     benign_blocks: Counter = field(default_factory=Counter)
+    benign_max_tier: Counter = field(default_factory=Counter)  # highest tier reached per benign session
+    scorers: list[Any] = field(default_factory=list)
     elapsed_s: float = 0.0
 
     @property
@@ -114,25 +123,36 @@ class RungResult:
 def score_attack(label: AttackLabel, st: SessionStats, res: AttackResult) -> None:
     res.n += 1
     res.prevented += label.prevented
-    hits = [(i, rule) for i, agent, rule in st.blocks if agent in label.attackers]
-    hits += [(i, "tier") for i, agent in st.escalations if agent in label.attackers]
+    res.aborted += label.aborted
+    start = label.first_malicious_idx
+    if start is None:  # attack never began: nothing to detect
+        return
+    # flags raised before the attack began are not detections of it
+    hits = [(i, rule) for i, agent, rule in st.blocks if agent in label.attackers and i >= start]
+    hits += [(i, "tier") for i, agent in st.escalations if agent in label.attackers and i >= start]
     if hits:
         res.detected += 1
         first_idx, rule = min(hits)
         res.rules[rule] += 1
-        if label.first_malicious_idx is not None:
-            res.ttd.append(first_idx - label.first_malicious_idx)
+        res.ttd.append(first_idx - start)
 
 
-def run_rung(rung: Rung, seeds: list[int], n_benign: int, n_attacks: int) -> RungResult:
+def run_rung(rung: Rung, seeds: list[int], n_benign: int, n_attacks: int,
+             make_scorer: Callable[[], Any] | None = None) -> RungResult:
+    """`make_scorer` builds a fresh behavioural scorer (sink + controller) per seed."""
     out = RungResult(rung)
     t0 = time.perf_counter()
     registry = default_registry()
     for seed in seeds:
         col = Collector()
-        summary = generate(n_benign, seed=seed, extra_sinks=[col],
+        scorer = make_scorer() if make_scorer else None
+        sinks = [scorer, col] if scorer else [col]
+        controllers = [scorer.controller] if scorer else []
+        summary = generate(n_benign, seed=seed, extra_sinks=sinks,
                            policy=Policy(registry, provenance=rung.provenance), config=rung.config,
-                           attacks=ATTACKS, attacks_per_type=n_attacks)
+                           attacks=ATTACKS, attacks_per_type=n_attacks, controllers=controllers)
+        if scorer:
+            out.scorers.append(scorer)
         attacked = {lab.session_id for lab in summary.labels}
         for lab in summary.labels:
             score_attack(lab, col.sessions[lab.session_id], out.attacks[lab.attack])
@@ -143,6 +163,7 @@ def run_rung(rung: Rung, seeds: list[int], n_benign: int, n_attacks: int) -> Run
             out.benign_gated += st.gated
             out.benign_blocked_sessions += bool(st.blocks)
             out.benign_blocks.update(rule for _, _, rule in st.blocks)
+            out.benign_max_tier[st.max_tier] += 1
     out.elapsed_s = time.perf_counter() - t0
     return out
 
@@ -189,7 +210,7 @@ def render(results: list[RungResult], seeds: list[int], n_benign: int, n_attacks
     tot = [(sum(a.prevented for a in r.attacks.values()), sum(a.n for a in r.attacks.values())) for r in results]
     lines.append("| **All attacks** | " + " | ".join(f"**{_pct(k, n)}**" for k, n in tot) + " |")
 
-    lines += ["", "## Attack detection (any block or Tier ≥2 on an attacker) and time-to-detect", "",
+    lines += ["", "## Attack detection (any block or Tier ≥2 on an attacker at or after the attack's first malicious event) and time-to-detect", "",
               "| Attack | " + " | ".join(r.rung.key for r in results) + " |",
               "|---|" + "---|" * len(results)]
     for name in ATTACKS:
@@ -198,7 +219,8 @@ def render(results: list[RungResult], seeds: list[int], n_benign: int, n_attacks
             a = r.attacks[name]
             ttd = f", median {statistics.median(a.ttd):.0f} events" if a.ttd else ""
             first = f", first rule {a.rules.most_common(1)[0][0]}" if a.rules else ""
-            cells.append(f"{100 * a.detected / a.n:.0f}%{ttd}{first}" if a.n else "n/a")
+            aborted = f" ({a.aborted} aborted before harm)" if a.aborted else ""
+            cells.append(f"{100 * a.detected / a.n:.0f}%{ttd}{first}{aborted}" if a.n else "n/a")
         lines.append(f"| {name} | " + " | ".join(cells) + " |")
 
     lines += ["", "## Cost on benign traffic", "",

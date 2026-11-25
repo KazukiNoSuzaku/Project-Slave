@@ -15,8 +15,9 @@ The full design is in [docs/design.md](docs/design.md).
 | Ops Terminal dashboard | done: `slave/dashboard` (runs on a scripted demo feed) |
 | **Phase 1:** gateway, static policy and caps, hash-chained event store, benign simulator | done: `slave/gateway`, `slave/store`, `slave/sim/swarm.py` |
 | **Phase 2:** provenance labels, rules P1–P3, attack library A1–A8, ablation harness | done: `slave/gateway`, `slave/sim/attacks.py`, `slave/eval`, [results](docs/results/phase2-ablation.md) |
-| Phase 3: fast-path features, Half-Space Trees, conformal calibration | next |
-| Phases 4–5: graph autoencoder, enforcement | not started |
+| **Phase 3:** fast-path features, Half-Space Trees, conformal calibration, tiers with hysteresis | done: `slave/features`, `slave/scoring`, [results](docs/results/phase3-fastpath.md) |
+| Phase 4: heterogeneous graph autoencoder | next |
+| Phase 5: enforcement (quarantine semantics, compensation, release) | not started |
 
 ## Phase 1: gateway, event store, benign simulator
 
@@ -62,13 +63,40 @@ Headline results (5 seeds, 10,000 benign sessions and 1,600 attack sessions per 
 
 | Rung | Attacks prevented | Benign sessions with ≥1 block |
 |---|---|---|
-| R1: static policy and caps | 12% (A4 only) | 0% |
-| R2: + provenance rules | 75% | 1.3% |
+| R1: static policy and caps | 14% (A4 only) | 0% |
+| R2: + provenance rules | 75% | 1.2% |
 | R2 + context reset between tasks | 75% | 0% |
 | R2 + reset + structured reports | 62% (A1 gets through again) | 0% |
 | R2 with stricter P1 | 88% (catches A7) | 17% |
 
 A5 (message loop) and A7 (mimicry through the normal delegation chain) pass the gate rules. They are the targets for the Phase 3 behavioural detectors.
+
+## Phase 3: behavioural fast path
+
+```bash
+uv run slave-eval phase3 --seeds 5 --benign 2000 --attacks 40 --out docs/results/phase3-fastpath.md
+```
+
+- **Features** (`slave/features/fastpath.py`): 19 per-action features, computed incrementally:
+  - smoothed action-transition surprisal with back-off, and flags for never-seen transitions and actions;
+  - window entropy and KL divergence from the role's normal action mix;
+  - ping-pong, identical-call repeats, action and message rates;
+  - spawn depth and rate;
+  - sensitivity above the role's normal maximum;
+  - session totals: sensitive stores touched and PII rows read;
+  - the caller's provenance labels.
+- **Model** (`slave/scoring`): a River Half-Space Trees model per role. It is trained on benign traffic split three ways: transition baseline, HST, and calibration. Two detectors (the HST score and transition surprisal) are converted to conformal p-values per role and fused with Bonferroni, p* = min(1, 2·min p).
+- **Tiers:** Tier 1 at p* < 1e-2, Tier 2 at p* < 1e-3, Tier 3 at two consecutive p* < 1e-4. Tiers 1 and 2 only drop back after a run of quiet actions, and Tier 3 needs a human to release it. The scorer runs as a gateway sink. Its tier changes are applied through a post-action controller, so the gate enforces them from the agent's next action.
+
+Headline results (5 seeds, 10,000 benign sessions and 1,600 attack sessions per rung, randomised attack variants):
+
+| Rung | Attacks prevented | A5 loop | A7 mimicry | Benign sessions at Tier ≥2 |
+|---|---|---|---|---|
+| R2: gate rules | 75% | 0% prevented, 0% detected | 0% prevented, 0% detected | 0.48% |
+| **R3: + fast path** | **87%** | 51% prevented, 100% detected | 46% prevented, 100% detected | 0.93% |
+| R3 + context reset | 86% | 50% / 100% | 38% / 100% | 0.06% |
+
+Calibration exit criterion met: on held-out benign traffic, every detector's empirical rate at α ∈ {1e-2, 1e-3, 1e-4} stays within 2× of α. The fused score sits at or below nominal. Caveats are in the report.
 
 ## Ops Terminal dashboard
 

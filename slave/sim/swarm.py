@@ -82,7 +82,13 @@ class AttackLabel:
 
     @property
     def prevented(self) -> bool:
-        return bool(self.harm) and not any(executed for _, executed in self.harm)
+        """No harm action executed. An attack disrupted before its first harm action counts."""
+        return not any(executed for _, executed in self.harm)
+
+    @property
+    def aborted(self) -> bool:
+        """The attack never reached a harm action (e.g. an earlier step was blocked)."""
+        return not self.harm
 
 
 class Ctx:
@@ -310,7 +316,8 @@ def run_session(gw: Gateway, clock: SimClock, rng: random.Random, session_id: st
 def generate(n_sessions: int, seed: int = 1, store: EventStore | None = None,
              extra_sinks: list[Callable[[Event], Event | None]] | None = None, *,
              policy: Policy | None = None, config: SimConfig = SimConfig(),
-             attacks: dict[str, AttackFn] | None = None, attacks_per_type: int = 0) -> SimSummary:
+             attacks: dict[str, AttackFn] | None = None, attacks_per_type: int = 0,
+             controllers: list | None = None) -> SimSummary:
     """Run `n_sessions` benign sessions plus `attacks_per_type` sessions of each attack, interleaved."""
     rng = random.Random(seed)
     clock = SimClock(SIM_EPOCH)
@@ -326,7 +333,8 @@ def generate(n_sessions: int, seed: int = 1, store: EventStore | None = None,
 
     sinks: list = [store] if store is not None else []
     sinks += [count, *(extra_sinks or [])]
-    gw = Gateway(policy=policy, executor=FakeTools(rng), sinks=sinks, clock=clock, latency_in_events=False)
+    gw = Gateway(policy=policy, executor=FakeTools(rng), sinks=sinks, clock=clock, latency_in_events=False,
+                 controllers=controllers or ())
 
     plans: list[tuple[str, AttackFn] | None] = [None] * n_sessions
     for name, fn in (attacks or {}).items():

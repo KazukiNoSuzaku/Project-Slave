@@ -51,6 +51,9 @@ Executor = Callable[[str, dict], ToolOutput]
 Sink = Callable[[Event], "Event | None"]  # may return a replacement (e.g. sealed) event
 # Human-in-the-loop for P1: (agent, tool, args, verdict) -> approved?
 Approver = Callable[[AgentState, str, dict, Verdict], bool]
+# Runs after every gated action, outside the gate's latency path. Used by the
+# behavioural scorer to push tier changes the gate will see on the next action.
+Controller = Callable[["Gateway", str], None]
 
 
 def _default_executor(tool: str, args: dict) -> ToolOutput:
@@ -77,10 +80,12 @@ class Gateway:
         clock: Callable[[], datetime] = _utcnow,
         latency_in_events: bool = True,
         approver: Approver | None = None,
+        controllers: Iterable[Controller] = (),
     ) -> None:
         self.registry = registry or default_registry()
         self.policy = policy or Policy(self.registry, provenance=ProvenanceRules())
         self.approver = approver
+        self.controllers = list(controllers)
         self.executor = executor
         self.sinks = list(sinks)
         self.clock = clock
@@ -158,7 +163,33 @@ class Gateway:
 
     # ---- gated actions ------------------------------------------------------
 
+    def _after(self, session_id: str) -> None:
+        for ctl in self.controllers:
+            ctl(self, session_id)
+
     def spawn(self, session_id: str, parent_id: str, child_id: str, child_role: str) -> Verdict:
+        verdict = self._spawn(session_id, parent_id, child_id, child_role)
+        self._after(session_id)
+        return verdict
+
+    def send(self, session_id: str, src_id: str, dst_id: str, *, token_count: int | None = None,
+             structured: bool = False) -> Verdict:
+        """Agent-to-agent message. A gate decision is recorded only on denial.
+
+        `structured=True` means the payload went through a schema-validated
+        channel (no free text). That declassifies *trust* — instructions can't
+        ride along — but data classes still propagate.
+        """
+        verdict = self._send(session_id, src_id, dst_id, token_count=token_count, structured=structured)
+        self._after(session_id)
+        return verdict
+
+    def call_tool(self, session_id: str, agent_id: str, tool_name: str, args: dict | None = None) -> ToolResponse:
+        resp = self._call_tool(session_id, agent_id, tool_name, args)
+        self._after(session_id)
+        return resp
+
+    def _spawn(self, session_id: str, parent_id: str, child_id: str, child_role: str) -> Verdict:
         t0 = time.perf_counter()
         sess = self._session(session_id)
         parent = self._agent(sess, parent_id)
@@ -181,14 +212,8 @@ class Gateway:
                    privilege_tier=role.privilege_tier)
         return verdict
 
-    def send(self, session_id: str, src_id: str, dst_id: str, *, token_count: int | None = None,
-             structured: bool = False) -> Verdict:
-        """Agent-to-agent message. A gate decision is recorded only on denial.
-
-        `structured=True` means the payload went through a schema-validated
-        channel (no free text). That declassifies *trust* — instructions can't
-        ride along — but data classes still propagate.
-        """
+    def _send(self, session_id: str, src_id: str, dst_id: str, *, token_count: int | None,
+              structured: bool) -> Verdict:
         t0 = time.perf_counter()
         sess = self._session(session_id)
         src = self._agent(sess, src_id)
@@ -214,7 +239,7 @@ class Gateway:
         agent.untrusted_requests.clear()
         self._emit(session_id, kind=EventKind.CONTEXT_RESET, src_id=agent_id, src_role=agent.role, reason=reason)
 
-    def call_tool(self, session_id: str, agent_id: str, tool_name: str, args: dict | None = None) -> ToolResponse:
+    def _call_tool(self, session_id: str, agent_id: str, tool_name: str, args: dict | None) -> ToolResponse:
         t0 = time.perf_counter()
         args = args or {}
         sess = self._session(session_id)
@@ -251,6 +276,11 @@ class Gateway:
         return ToolResponse(True, output=output)
 
     # ---- control plane ------------------------------------------------------
+
+    def agent_tier(self, session_id: str, agent_id: str) -> Tier | None:
+        sess = self.sessions.get(session_id)
+        agent = sess.agents.get(agent_id) if sess else None
+        return agent.tier if agent else None
 
     def set_tier(self, session_id: str, agent_id: str, tier: Tier, reason: str) -> None:
         sess = self._session(session_id)

@@ -137,6 +137,8 @@ Prompt injection enters through *content*. Graph topology alone can't see "this 
 
 **Measured (Phase 2):** see [results/phase2-ablation.md](results/phase2-ablation.md). Adding P1–P3 raises prevention across A1–A8 from 12% to 75%. 1.3% of benign sessions see at least one block, and a context reset between tasks removes all of those blocks in the simulator.
 
+**Measured (Phase 3):** see [results/phase3-fastpath.md](results/phase3-fastpath.md). The behavioural fast path raises prevention from 75% to 87% and detects A5 and A7, which no gate rule catches. Calibration holds within 2× of nominal. With p* = 2·min p, a role needs more than about 20,000 calibration scores before the fast path alone can reach Tier 3.
+
 **Known limitation — label creep:** conservative propagation over-taints long sessions. We measure an **over-taint rate** (benign calls blocked by P1–P3) as a first-class metric and evaluate two mitigations: per-agent context resets on task boundaries, and sanitizer declassification.
 
 ---
