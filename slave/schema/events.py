@@ -8,12 +8,13 @@ ordered log.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from enum import Enum, IntEnum
 from typing import Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_serializer
 
 
 class EventKind(str, Enum):
@@ -74,11 +75,21 @@ class Event(BaseModel):
     dst_role: str | None = None
     dst_type: NodeType | None = None
 
+    # agent metadata (source agent unless noted)
+    privilege_tier: int | None = None
+    spawn_depth: int | None = None  # SPAWN: depth of the child
+
     # tool / data metadata
     side_effect: SideEffect | None = None
+    sensitivity: int | None = None
+    args_hash: str | None = None
+    status: Literal["ok", "error"] | None = None
     trust: Trust | None = None
     data_classes: set[str] = Field(default_factory=set)
+    resource_uri: str | None = None
+    op: str | None = None
     row_volume: int | None = None
+    token_count: int | None = None
 
     # control-plane fields
     decision: Decision | None = None
@@ -87,3 +98,21 @@ class Event(BaseModel):
     p_star: float | None = None
     tier: Tier | None = None
     reason: str | None = None
+
+    # set by the event store when the event is sealed into the hash chain
+    seq: int | None = None
+    prev_hash: str | None = None
+    hash: str | None = None
+
+    @field_serializer("data_classes")
+    def _sorted_classes(self, v: set[str]) -> list[str]:
+        # sets have no stable order; hashing needs one
+        return sorted(v)
+
+    def canonical_json(self) -> str:
+        """Deterministic JSON of the event content (chain fields excluded)."""
+        body = self.model_dump(mode="json", exclude=CHAIN_FIELDS, exclude_none=True)
+        return json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+CHAIN_FIELDS = {"seq", "prev_hash", "hash"}
