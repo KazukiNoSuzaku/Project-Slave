@@ -13,7 +13,7 @@ These defaults are used throughout. Change any of them and the affected sections
 | Decision | Default chosen | Why |
 |---|---|---|
 | Scope | Capstone-scale reference implementation; every layer behind an interface so it can be swapped for Kafka/Flink/Triton at scale | Buildable in 16 weeks and evaluable end to end |
-| Agent runtime | Custom Python swarm simulator speaking an MCP-style tool protocol; optional LLM-driven agents (Claude) for realism runs | Deterministic, cheap, reproducible traces with ground-truth attack labels |
+| Agent runtime | Custom Python swarm simulator speaking an MCP-style tool protocol; optional LLM-driven agents for realism runs | Deterministic, cheap, reproducible traces with ground-truth attack labels |
 | Language | Python 3.12 throughout | PyG, River, FastAPI all native |
 | Core contributions | (1) Provenance/taint-aware gating, (2) heterogeneous graph autoencoder with calibrated fusion, (3) ablation showing what each layer buys | Gives a research result, not just integration |
 
@@ -343,7 +343,7 @@ There are no "verified benign production traces" to start from, so the simulator
 * **Roles:** planner (orchestrator), researcher, coder, reviewer, data_analyst, ops.
 * **Tools:** `web_fetch`*, `search`*, `read_file`, `write_file`, `git_diff`, `git_commit`, `run_tests`, `sql_query` (internal), `hr_payroll_query` (restricted), `send_email`†, `http_post`†, `spawn_agent`. (*untrusted source, †egress)
 * **Benign behavior:** stochastic task scripts per role (parametrized workflows: research → summarize, code → test → review → commit, analyze → report), with randomized durations, retries, errors, and occasional legitimate bursts and new-tool rollouts — so the FPR is measured against realistic noise, not a toy baseline.
-* **LLM mode (optional):** the same roles driven by Claude via tool use, for a smaller realism validation set.
+* **LLM mode (optional):** the same roles driven by a tool-using LLM, for a smaller realism validation set.
 * **Attacks:** A1–A8 as injectable scenario modules with ground-truth labels: attacker agent(s), the first malicious event, and the "harm event" (the call that would cause damage).
 
 ---
